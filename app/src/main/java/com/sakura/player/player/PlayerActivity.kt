@@ -43,10 +43,10 @@ class PlayerActivity : AppCompatActivity() {
         // Force landscape, keep screen on
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        hideSystemUI()
 
         player = SakuraPlayerView(this)
         setContentView(player)
+        hideSystemUI()
 
         val source = intent.getStringExtra(EXTRA_SOURCE) ?: "online"
         val title = intent.getStringExtra(EXTRA_TITLE) ?: ""
