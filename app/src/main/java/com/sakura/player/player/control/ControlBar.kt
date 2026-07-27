@@ -5,8 +5,6 @@ import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
-import android.os.Handler
-import android.os.Looper
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -20,16 +18,10 @@ import kotlin.math.roundToInt
 /**
  * Layer 5: Bottom control bar with progress track, time labels, and action buttons.
  *
- * Layout (top to bottom):
- *   - ProgressTrack (custom view with Canvas-drawn track + draggable dot)
- *   - Time label row: current time (left) / total time (right)
- *   - Button row: play/pause, prev, next (fullscreen only), speed, episodes, fullscreen
- *
- * Auto-hides via alpha animation. Preview bubble appears during progress drag.
+ * Uses FrameLayout so the preview bubble can float above the rows as an overlay.
  */
-class ControlBar(context: Context) : LinearLayout(context) {
+class ControlBar(context: Context) : FrameLayout(context) {
 
-    // ── Public callbacks ──
     var onPlayPause: (() -> Unit)? = null
     var onPrev: (() -> Unit)? = null
     var onNext: (() -> Unit)? = null
@@ -41,17 +33,13 @@ class ControlBar(context: Context) : LinearLayout(context) {
     var onSeekEnd: (() -> Unit)? = null
     var onFineSeek: ((Float) -> Unit)? = null
 
-    /** Pass the video duration (ms) into ProgressTrack so it can compute positions. */
     var duration: Long = 1L
-        set(value) {
-            field = value
-            progressTrack.duration = value
-        }
+        set(value) { field = value; progressTrack.duration = value }
 
-    /** Update the seek position tracked inside the progress bar. */
     var trackedPosition: Long = 0L
 
-    // ── Views ──
+    // Child views
+    private val rowsContainer: LinearLayout
     private val progressTrack: ProgressTrack
     private val timeCurrent: TextView
     private val timeTotal: TextView
@@ -61,40 +49,25 @@ class ControlBar(context: Context) : LinearLayout(context) {
     private val btnFullscreen: TextView
     private val btnEpisodes: TextView
     private val btnSpeed: TextView
-    private val previewBubble: BubbleView
+    private val previewBubble: TextView
 
-    private val handler = Handler(Looper.getMainLooper())
     private var hideAnim: ValueAnimator? = null
     private var showFullUI: Boolean = true
 
     init {
-        orientation = VERTICAL
-
-        // Dark translucent background
         setBackgroundColor(Color.argb(180, 0, 0, 0))
 
-        // ── Row 1: Progress track (40dp) ──
-        progressTrack = ProgressTrack(context).apply {
-            onSeekStart = { onSeekStart?.invoke() }
-            onSeek = { fraction -> onSeek?.invoke(fraction) }
-            onSeekEnd = { onSeekEnd?.invoke() }
-            onFineSeek = { delta -> onFineSeek?.invoke(delta) }
-            onPreviewUpdate = { positionMs, totalMs, xPos ->
-                previewBubble.text = "${formatTime(positionMs)} / ${formatTime(totalMs)}"
-                previewBubble.visibility = View.VISIBLE
-                previewBubble.x = xPos - previewBubble.measuredWidth / 2f
-                previewBubble.y = -previewBubble.measuredHeight - 8f
-            }
-            onPreviewHide = {
-                previewBubble.visibility = View.GONE
-            }
+        // ── Rows container (LinearLayout) ──
+        rowsContainer = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
         }
-        addView(
-            progressTrack,
-            LayoutParams(LayoutParams.MATCH_PARENT, dp(40))
-        )
 
-        // ── Row 2: Time labels ──
+        // Row 1: Progress track
+        progressTrack = ProgressTrack(context)
+        rowsContainer.addView(progressTrack,
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(40)))
+
+        // Row 2: Time labels
         val timeRow = FrameLayout(context).apply {
             setPadding(dp(12), dp(2), dp(12), dp(2))
         }
@@ -104,32 +77,28 @@ class ControlBar(context: Context) : LinearLayout(context) {
         timeTotal = makeLabel("00:00", 12f, Color.argb(200, 255, 255, 255)).apply {
             gravity = Gravity.END or Gravity.CENTER_VERTICAL
         }
-        timeRow.addView(
-            timeCurrent,
-            FrameLayout.LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT).apply {
-                gravity = Gravity.START or Gravity.CENTER_VERTICAL
-            }
-        )
-        timeRow.addView(
-            timeTotal,
-            FrameLayout.LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT).apply {
-                gravity = Gravity.END or Gravity.CENTER_VERTICAL
-            }
-        )
-        addView(timeRow, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
+        timeRow.addView(timeCurrent, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT).apply {
+            gravity = Gravity.START or Gravity.CENTER_VERTICAL
+        })
+        timeRow.addView(timeTotal, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT).apply {
+            gravity = Gravity.END or Gravity.CENTER_VERTICAL
+        })
+        rowsContainer.addView(timeRow)
 
-        // ── Row 3: Button row (48dp) ──
+        // Row 3: Button row
         val btnRow = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(8), 0, dp(8), dp(8))
         }
-        btnPlay = makeBtn("\u25B6", 22f)  // ▶
-        btnPrev = makeBtn("\u23EE", 20f)  // ⏮
-        btnNext = makeBtn("\u23ED", 20f)  // ⏭
-        btnSpeed = makeBtn("\u23E9", 16f) // ⏩
-        btnEpisodes = makeBtn("\u2261", 20f) // ≡
-        btnFullscreen = makeBtn("\u26F6", 18f) // ⛶
+        btnPlay = makeBtn("\u25B6", 22f)
+        btnPrev = makeBtn("\u23EE", 20f)
+        btnNext = makeBtn("\u23ED", 20f)
+        btnSpeed = makeBtn("\u23E9", 16f)
+        btnEpisodes = makeBtn("\u2261", 20f)
+        btnFullscreen = makeBtn("\u26F6", 18f)
 
         btnPlay.setOnClickListener { onPlayPause?.invoke() }
         btnPrev.setOnClickListener { onPrev?.invoke() }
@@ -138,22 +107,52 @@ class ControlBar(context: Context) : LinearLayout(context) {
         btnEpisodes.setOnClickListener { onEpisodes?.invoke() }
         btnFullscreen.setOnClickListener { onFullscreen?.invoke() }
 
-        // Equal-weight layout for buttons
-        val btnParams = LinearLayout.LayoutParams(0, dp(48), 1f).apply {
-            gravity = Gravity.CENTER
-        }
+        val btnParams = LinearLayout.LayoutParams(0, dp(48), 1f).apply { gravity = Gravity.CENTER }
         btnRow.addView(btnPlay, btnParams)
         btnRow.addView(btnPrev, btnParams)
         btnRow.addView(btnNext, btnParams)
         btnRow.addView(btnSpeed, btnParams)
         btnRow.addView(btnEpisodes, btnParams)
         btnRow.addView(btnFullscreen, btnParams)
-        addView(btnRow, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
+        rowsContainer.addView(btnRow)
 
-        // ── Preview bubble (overlay, initially hidden) ──
-        previewBubble = BubbleView(context)
-        previewBubble.visibility = View.GONE
-        addView(previewBubble)
+        // Add the rows container to FrameLayout (anchored at bottom)
+        addView(rowsContainer, LayoutParams(
+            LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT
+        ).apply { gravity = Gravity.BOTTOM })
+
+        // ── Preview bubble (floating overlay, initially hidden) ──
+        previewBubble = TextView(context).apply {
+            setBackgroundColor(Color.argb(200, 0, 0, 0))
+            setTextColor(Color.WHITE)
+            textSize = 12f
+            val p = dp(8)
+            setPadding(p, p / 2, p, p / 2)
+            gravity = Gravity.CENTER
+            visibility = View.GONE
+        }
+        addView(previewBubble, LayoutParams(
+            LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT
+        ))
+
+        // Wire progress track callbacks
+        progressTrack.onSeekStart = { onSeekStart?.invoke() }
+        progressTrack.onSeek = { ms -> onSeek?.invoke(ms) }
+        progressTrack.onSeekEnd = { onSeekEnd?.invoke() }
+        progressTrack.onFineSeek = { delta -> onFineSeek?.invoke(delta) }
+        progressTrack.onPreviewUpdate = { posMs, totalMs, xPx ->
+            previewBubble.text = "${formatTime(posMs)} / ${formatTime(totalMs)}"
+            previewBubble.visibility = View.VISIBLE
+            previewBubble.post {
+                val bw = previewBubble.width.coerceAtLeast(1)
+                val bh = previewBubble.height.coerceAtLeast(1)
+                previewBubble.x = (xPx - bw / 2f).coerceIn(0f, this@ControlBar.width - bw.toFloat())
+                previewBubble.y = (this@ControlBar.height - rowsContainer.height - bh - dp(8)).toFloat()
+            }
+        }
+        progressTrack.onPreviewHide = {
+            previewBubble.visibility = View.GONE
+        }
     }
 
     // ── Public API ──
@@ -169,10 +168,9 @@ class ControlBar(context: Context) : LinearLayout(context) {
     }
 
     fun updatePlayPause(isPlaying: Boolean) {
-        btnPlay.text = if (isPlaying) "\u23F8" else "\u25B6"  // ⏸ or ▶
+        btnPlay.text = if (isPlaying) "\u23F8" else "\u25B6"
     }
 
-    /** Show/hide prev/next buttons based on player mode (FULLSCREEN = show, INLINE = hide). */
     fun setShowFullUI(show: Boolean) {
         showFullUI = show
         btnPrev.visibility = if (show) View.VISIBLE else View.GONE
@@ -181,247 +179,148 @@ class ControlBar(context: Context) : LinearLayout(context) {
 
     fun show() {
         hideAnim?.cancel()
-        val anim = ValueAnimator.ofFloat(alpha, 1f).apply {
-            duration = 200
-            interpolator = DecelerateInterpolator()
-            addUpdateListener { alpha = it.animatedValue as Float }
+        hideAnim = ValueAnimator.ofFloat(alpha, 1f).apply {
+            duration = 200; interpolator = DecelerateInterpolator()
+            addUpdateListener { alpha = it.animatedValue as Float }; start()
         }
-        hideAnim = anim
-        anim.start()
     }
 
     fun hide() {
         hideAnim?.cancel()
-        val anim = ValueAnimator.ofFloat(alpha, 0f).apply {
-            duration = 300
-            interpolator = DecelerateInterpolator()
-            addUpdateListener { alpha = it.animatedValue as Float }
+        hideAnim = ValueAnimator.ofFloat(alpha, 0f).apply {
+            duration = 300; interpolator = DecelerateInterpolator()
+            addUpdateListener { alpha = it.animatedValue as Float }; start()
         }
-        hideAnim = anim
-        anim.start()
     }
 
-    /** Whether the user is currently dragging the progress dot. */
     val isDragging: Boolean get() = progressTrack.isDragging
 
-    /** Show preview bubble for gesture-based seek (positionMs, totalMs). */
     fun showPreview(positionMs: Long, totalMs: Long) {
         previewBubble.text = "${formatTime(positionMs)} / ${formatTime(totalMs)}"
         previewBubble.visibility = View.VISIBLE
-        post {
-            previewBubble.x = (width - previewBubble.measuredWidth) / 2f
-            previewBubble.y = -previewBubble.measuredHeight - 8f
+        previewBubble.post {
+            val bw = previewBubble.width.coerceAtLeast(1)
+            val bh = previewBubble.height.coerceAtLeast(1)
+            previewBubble.x = (this.width - bw) / 2f
+            previewBubble.y = (this.height - rowsContainer.height - bh - dp(8)).toFloat()
         }
     }
 
-    /** Hide the gesture-seek preview bubble. */
     fun hidePreview() {
         previewBubble.visibility = View.GONE
     }
 
-    // ── Internal helpers ──
+    // ── Helpers ──
 
     private fun makeLabel(text: String, size: Float, color: Int): TextView {
-        return TextView(context).apply {
-            this.text = text
-            textSize = size
-            setTextColor(color)
-        }
+        return TextView(context).apply { this.text = text; textSize = size; setTextColor(color) }
     }
 
     private fun makeBtn(text: String, size: Float): TextView {
         return TextView(context).apply {
-            this.text = text
-            textSize = size
-            setTextColor(Color.WHITE)
-            gravity = Gravity.CENTER
+            this.text = text; textSize = size; setTextColor(Color.WHITE); gravity = Gravity.CENTER
         }
     }
 
     fun formatTime(ms: Long): String {
         val totalSec = (ms / 1000L).coerceAtLeast(0)
-        val min = totalSec / 60
-        val sec = totalSec % 60
-        return "${min.toString().padStart(2, '0')}:${sec.toString().padStart(2, '0')}"
+        return "${(totalSec / 60).toString().padStart(2, '0')}:${(totalSec % 60).toString().padStart(2, '0')}"
     }
 
     private fun dp(value: Int): Int {
         return (value * context.resources.displayMetrics.density).roundToInt()
     }
-
-    // ── Bubble overlay view ──
-    private class BubbleView(context: Context) : TextView(context) {
-        init {
-            setBackgroundColor(Color.argb(200, 0, 0, 0))
-            setTextColor(Color.WHITE)
-            textSize = 12f
-            val p = dp(8, context)
-            setPadding(p, p / 2, p, p / 2)
-            gravity = Gravity.CENTER
-        }
-
-        override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-            super.onMeasure(widthMeasureSpec, heightMeasureSpec)
-            // Position based on x / y after measurement
-        }
-    }
-
-    companion object {
-        private fun dp(value: Int, ctx: Context): Int {
-            return (value * ctx.resources.displayMetrics.density).roundToInt()
-        }
-    }
 }
 
 
 /**
- * Custom progress track drawn entirely via Canvas.
- *
- * Draws (bottom to top):
- *   1. Background track — semi-transparent white rounded rect
- *   2. Buffer bar — lighter gray rounded rect (shows loaded range)
- *   3. Progress bar — B站 pink (#FB7299) rounded rect
- *   4. Draggable dot — pink fill + white stroke circle; scales 1.4x when dragging
- *
- * Touch handling:
- *   - Horizontal drag on the track: seek (calls [onSeek] with position in ms)
- *   - Vertical movement > 5px during drag: fine-seek (calls [onFineSeek] with delta)
- *   - Dot scales up on press (isDragging = true)
+ * Custom progress track drawn via Canvas.
  */
 class ProgressTrack(context: Context) : View(context) {
 
-    /** Current playback progress 0..1. */
     var progress: Float = 0f
-
-    /** Buffered range 0..1. */
     var bufferProgress: Float = 0f
-
-    /** Video duration in ms, used to convert drag fraction to position. */
     var duration: Long = 1L
-
     var onSeekStart: (() -> Unit)? = null
-    var onSeek: ((Long) -> Unit)? = null        // position in ms
+    var onSeek: ((Long) -> Unit)? = null
     var onSeekEnd: (() -> Unit)? = null
-    var onFineSeek: ((Float) -> Unit)? = null   // delta in seconds
+    var onFineSeek: ((Float) -> Unit)? = null
     var onPreviewUpdate: ((positionMs: Long, totalMs: Long, xPx: Float) -> Unit)? = null
     var onPreviewHide: (() -> Unit)? = null
-
-    /** Whether the user is currently touching / dragging the track. */
     var isDragging: Boolean = false
         private set
 
-    // ── Paints ──
     private val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(60, 255, 255, 255)
-        style = Paint.Style.FILL
+        color = Color.argb(60, 255, 255, 255); style = Paint.Style.FILL
     }
     private val bufferPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(80, 255, 255, 255)
-        style = Paint.Style.FILL
+        color = Color.argb(80, 255, 255, 255); style = Paint.Style.FILL
     }
     private val progressPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#FB7299")
-        style = Paint.Style.FILL
+        color = Color.parseColor("#FB7299"); style = Paint.Style.FILL
     }
     private val dotFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#FB7299")
-        style = Paint.Style.FILL
+        color = Color.parseColor("#FB7299"); style = Paint.Style.FILL
     }
     private val dotStrokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.WHITE
-        style = Paint.Style.STROKE
-        strokeWidth = 2.5f
+        color = Color.WHITE; style = Paint.Style.STROKE; strokeWidth = 2.5f
     }
 
     private var dragFraction = 0f
     private var downY = 0f
 
     init {
-        // Allow touch interaction on the entire view
-        isClickable = true
-        isFocusable = true
+        isClickable = true; isFocusable = true
     }
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
+        val w = width.toFloat(); val h = height.toFloat()
+        val trackH = dp(4).toFloat(); val trackY = h / 2f - trackH / 2f; val cornerR = trackH / 2f
 
-        val w = width.toFloat()
-        val h = height.toFloat()
-        val trackH = dp(4).toFloat()
-        val trackY = h / 2f - trackH / 2f
-        val cornerR = trackH / 2f
-
-        // 1. Background track (full width)
         canvas.drawRoundRect(0f, trackY, w, trackY + trackH, cornerR, cornerR, bgPaint)
-
-        // 2. Buffer bar
         if (bufferProgress > 0f) {
-            val bufferW = w * bufferProgress.coerceIn(0f, 1f)
-            canvas.drawRoundRect(0f, trackY, bufferW, trackY + trackH, cornerR, cornerR, bufferPaint)
+            canvas.drawRoundRect(0f, trackY, w * bufferProgress.coerceIn(0f, 1f),
+                trackY + trackH, cornerR, cornerR, bufferPaint)
         }
-
-        // 3. Progress bar
         val p = if (isDragging) dragFraction else progress
         val progressW = w * p.coerceIn(0f, 1f)
         canvas.drawRoundRect(0f, trackY, progressW, trackY + trackH, cornerR, cornerR, progressPaint)
 
-        // 4. Draggable dot
         val dotR = if (isDragging) dp(7).toFloat() else dp(5).toFloat()
         val dotX = progressW.coerceIn(dotR, w - dotR)
-        val dotY = h / 2f
-
-        canvas.drawCircle(dotX, dotY, dotR, dotFillPaint)
-        canvas.drawCircle(dotX, dotY, dotR, dotStrokePaint)
+        canvas.drawCircle(dotX, h / 2f, dotR, dotFillPaint)
+        canvas.drawCircle(dotX, h / 2f, dotR, dotStrokePaint)
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
         val w = width.toFloat()
-
         when (event.action) {
             MotionEvent.ACTION_DOWN -> {
-                // Start drag at touch position
-                isDragging = true
-                downY = event.y
+                isDragging = true; downY = event.y
                 dragFraction = (event.x / w).coerceIn(0f, 1f)
                 onSeekStart?.invoke()
                 val posMs = (dragFraction * duration).toLong()
                 onSeek?.invoke(posMs)
-
-                // Show preview
                 onPreviewUpdate?.invoke(posMs, duration, event.x)
-                invalidate()
-                return true
+                invalidate(); return true
             }
-
             MotionEvent.ACTION_MOVE -> {
                 if (!isDragging) return false
                 dragFraction = (event.x / w).coerceIn(0f, 1f)
                 val posMs = (dragFraction * duration).toLong()
                 onSeek?.invoke(posMs)
-
-                // Vertical movement = fine-seek (delta in seconds)
                 val dy = event.y - downY
                 if (abs(dy) > dp(5)) {
-                    // Moving finger down = negative delta (seek backward a bit)
-                    // Scale so ~100px vertical = ~10s fine adjustment
-                    val delta = -dy * 0.1f
-                    onFineSeek?.invoke(delta)
-                    downY = event.y // reset anchor to avoid accumulating
+                    onFineSeek?.invoke(-dy * 0.1f)
+                    downY = event.y
                 }
-
-                // Update preview
                 onPreviewUpdate?.invoke(posMs, duration, event.x)
-                invalidate()
-                return true
+                invalidate(); return true
             }
-
-            MotionEvent.ACTION_UP,
-            MotionEvent.ACTION_CANCEL -> {
-                isDragging = false
-                onSeekEnd?.invoke()
-                onPreviewHide?.invoke()
-                invalidate()
-                return true
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                isDragging = false; onSeekEnd?.invoke(); onPreviewHide?.invoke()
+                invalidate(); return true
             }
         }
         return super.onTouchEvent(event)
