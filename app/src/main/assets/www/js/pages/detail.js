@@ -136,20 +136,23 @@ function playEpisode(epIndex) {
     const v = $('#detail-video');
     $('#player-cover').style.display = 'none';
     $('#player-loading').style.display = '';
-    // Hide video element & WebView controls — native SakuraPlayer handles UI
-    v.style.display = 'none';
-    $('#player-ctrls').style.display = 'none';
 
     if (window.currentDetail.isLocal) {
+        // Local playback: show WebView controls (JS-side UI drives the old ExoPlayer)
+        v.style.display = 'block';
+        $('#player-ctrls').style.display = '';
+
         const ep = window.currentDetail.episodes?.find(e => e.index === epIndex);
         if (ep && ep.path) {
-            // Use ExoPlayer for local files
             startLocalPlayer(ep.path);
         } else {
             showToast('找不到本地文件');
             $('#player-loading').style.display = 'none';
         }
     } else {
+        // Online: hide WebView controls — native SakuraPlayer handles UI
+        v.style.display = 'none';
+        $('#player-ctrls').style.display = 'none';
         // Online streaming: use native SakuraPlayer (ExoPlayer + B站 gesture controls)
         var playerArea = $('#player-area');
         var rect = playerArea.getBoundingClientRect();
