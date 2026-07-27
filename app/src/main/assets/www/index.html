@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#FB7299">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>樱花动漫</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<!-- ==================== Tab Bar ==================== -->
+<nav id="tab-bar">
+  <div class="tab-item active" data-tab="home">
+    <span class="tab-icon">🏠</span><span class="tab-label">首页</span>
+  </div>
+  <div class="tab-item" data-tab="discover">
+    <span class="tab-icon">🔍</span><span class="tab-label">发现</span>
+  </div>
+  <div class="tab-item" data-tab="download">
+    <span class="tab-icon">📥</span><span class="tab-label">下载</span>
+  </div>
+  <div class="tab-item" data-tab="me">
+    <span class="tab-icon">👤</span><span class="tab-label">我的</span>
+  </div>
+</nav>
+
+<!-- ==================== View Container ==================== -->
+<div id="views">
+
+  <!-- ===== HOME TAB ===== -->
+  <div id="view-home" class="view active">
+    <header class="top-bar">
+      <button class="top-btn settings-btn" onclick="goSettings()">⚙</button>
+      <span class="top-title">樱花动漫</span>
+      <span class="top-spacer"></span>
+    </header>
+    <div class="search-bar" onclick="goSearch()">
+      <i class="search-icon">🔍</i><span class="search-placeholder">搜索动漫...</span>
+    </div>
+    <div class="home-tabs">
+      <div class="home-tab active" data-htab="local">本地动漫</div>
+      <div class="home-tab" data-htab="follow">追番列表</div>
+    </div>
+    <div id="local-breadcrumb"></div>
+    <div id="local-grid" class="card-grid local-card-grid"></div>
+    <div id="local-action-bar" style="display:none">
+      <button class="act-btn" onclick="toggleSelectAll()" id="btn-select-all">全选</button>
+      <button class="act-btn" onclick="localMove()">移动</button>
+      <button class="act-btn" onclick="localRename()" id="btn-rename">重命名</button>
+      <button class="act-btn act-btn-danger" onclick="localDelete()">删除</button>
+      <button class="act-btn" onclick="localRedownload()" id="btn-redownload" style="opacity:0.5">重新下载</button>
+      <button class="act-btn" onclick="exitSelectMode()">取消</button>
+    </div>
+    <div id="follow-grid" class="card-grid" style="display:none"></div>
+    <div id="local-empty" class="empty-state" style="display:none">
+      <div class="empty-icon">📂</div>
+      <div class="empty-text">还没有下载任何动漫~</div>
+      <div class="empty-sub">去搜索并下载你喜欢的动漫吧</div>
+    </div>
+    <div id="follow-empty" class="empty-state" style="display:none">
+      <div class="empty-icon">⭐</div>
+      <div class="empty-text">还没有追番~</div>
+      <div class="empty-sub">搜索动漫并点击追番按钮</div>
+    </div>
+  </div>
+
+  <!-- ===== DISCOVER TAB ===== -->
+  <div id="view-discover" class="view">
+    <header class="top-bar">
+      <span class="top-spacer"></span>
+      <span class="top-title">发现</span>
+      <span class="top-spacer"></span>
+    </header>
+    <div class="search-bar" onclick="goSearch()">
+      <i class="search-icon">🔍</i><span class="search-placeholder">搜索动漫...</span>
+    </div>
+    <div class="discover-categories">
+      <span class="dcat active" data-cat="recommend">推荐</span>
+      <span class="dcat" data-cat="20">日本动漫</span>
+      <span class="dcat" data-cat="21">国产动漫</span>
+      <span class="dcat" data-cat="22">欧美动漫</span>
+      <span class="dcat" data-cat="23">动漫电影</span>
+    </div>
+    <div id="discover-grid" class="card-grid"></div>
+    <div id="discover-loading" class="loading-spinner">加载中...</div>
+  </div>
+
+  <!-- ===== DOWNLOAD TAB ===== -->
+  <div id="view-download" class="view">
+    <header class="top-bar">
+      <span class="top-spacer"></span>
+      <span class="top-title">下载管理</span>
+      <button class="top-btn-text" onclick="resumeAllDownloads()">全部恢复</button>
+      <button class="top-btn-text" onclick="pauseAllDownloads()">全部暂停</button>
+      <button class="top-btn-text" onclick="cancelAllDownloads()">全部取消</button>
+    </header>
+    <div class="search-bar" onclick="goSearch()">
+      <i class="search-icon">🔍</i><span class="search-placeholder">搜索并下载动漫...</span>
+    </div>
+    <div id="dl-list"></div>
+    <div id="dl-empty" class="empty-state">
+      <div class="empty-icon">📥</div>
+      <div class="empty-text">暂无下载任务</div>
+      <div class="empty-sub">搜索动漫并点击下载开始</div>
+    </div>
+  </div>
+
+  <!-- ===== ME TAB ===== -->
+  <div id="view-me" class="view">
+    <header class="top-bar">
+      <span class="top-spacer"></span>
+      <span class="top-title">我的</span>
+      <span class="top-spacer"></span>
+    </header>
+    <div class="me-list">
+      <div class="me-item" onclick="goSettings()">
+        <span>⚙ 设置</span><span class="me-arrow">›</span>
+      </div>
+      <div class="me-item" onclick="window.Sakura.refreshDomain()">
+        <span>🔄 刷新站点域名</span><span class="me-arrow">›</span>
+      </div>
+      <div class="me-item" onclick="showAbout()">
+        <span>ℹ 关于</span><span class="me-arrow">›</span>
+      </div>
+    </div>
+    <div class="me-info">
+      <div class="me-domain" id="domain-display">当前站点: 检测中...</div>
+    </div>
+  </div>
+
+  <!-- ===== SEARCH PAGE (overlay) ===== -->
+  <div id="view-search" class="view overlay">
+    <header class="top-bar">
+      <button class="top-btn" onclick="closeSearch()">←</button>
+      <div class="search-input-wrap">
+        <input type="text" id="search-input" class="search-input-real" placeholder="输入动漫关键词"
+          autocomplete="off" onkeydown="if(event.key==='Enter')doSearch()">
+      </div>
+      <button class="top-btn-text" onclick="doSearch()">搜索</button>
+    </header>
+    <div id="search-results" class="card-grid"></div>
+    <div id="search-empty" class="empty-state" style="display:none">
+      <div class="empty-icon">🔍</div>
+      <div class="empty-text">没有找到相关动漫</div>
+    </div>
+    <div id="search-spinner" class="loading-spinner" style="display:none">搜索中...</div>
+  </div>
+
+  <!-- ===== DETAIL PAGE (overlay, B站风格) ===== -->
+  <div id="view-detail" class="view overlay">
+    <header class="top-bar detail-bar">
+      <button class="top-btn" onclick="closeDetail()">←</button>
+      <span class="top-title" id="detail-title">详情</span>
+      <span class="top-spacer"></span>
+    </header>
+    <div class="detail-content">
+      <!-- 播放器区域 (16:9, B站上半屏) -->
+      <div id="player-area">
+        <div id="player-cover"><img id="player-cover-img" src="" alt=""></div>
+        <video id="detail-video" playsinline webkit-playsinline style="display:none"></video>
+        <div id="player-ctrls">
+          <div id="p-prog-row">
+            <span class="p-t" id="p-tcur">00:00</span>
+            <div id="p-track"><div id="p-inner"><div id="p-buf"></div><div id="p-fill"></div><div id="p-dot"></div></div></div>
+            <span class="p-t" id="p-ttot">00:00</span>
+          </div>
+          <div id="p-btm">
+            <button id="p-pp">▶</button><span class="p-sp"></span><button id="p-fs">⛶</button>
+          </div>
+          <button id="p-lock">🔓</button>
+          <div class="p-hud" id="p-vol"><span class="p-hud-icon">🔊</span><div class="p-hud-bar"><div class="p-hud-fill"></div></div><span class="p-hud-label">100%</span></div>
+          <div class="p-hud" id="p-bri"><span class="p-hud-icon">☀</span><div class="p-hud-bar"><div class="p-hud-fill"></div></div><span class="p-hud-label">100%</span></div>
+          <div class="p-tip" id="p-tip-speed"></div>
+          <div id="p-seek-pv"><span class="cur">00:00</span><span class="sep">/</span><span class="total">00:00</span></div>
+        </div>
+        <div id="player-loading" class="p-loading" style="display:none">加载中...</div>
+      </div>
+      <!-- 下半部分：信息+选集 (可滚动) -->
+      <div class="detail-body">
+        <h2 id="d-title"></h2>
+        <div id="d-tags" class="tag-row"></div>
+        <p id="d-desc" class="detail-desc"></p>
+        <div class="detail-actions" id="detail-actions">
+          <button class="btn-outline" id="btn-follow-detail" onclick="toggleFollow()">⭐ 追番</button>
+          <button class="btn-outline" id="btn-dl-all" onclick="batchDownload()">📥 批量下载</button>
+          <button class="btn-outline" id="btn-re-dl" onclick="redownloadFromDetail()" style="display:none">🔄 重新下载当前剧集</button>
+        </div>
+        <h3>选集</h3>
+        <div id="episode-grid" class="ep-grid"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== SETTINGS PAGE (overlay) ===== -->
+  <div id="view-settings" class="view overlay">
+    <header class="top-bar">
+      <button class="top-btn" onclick="closeSettings()">←</button>
+      <span class="top-title">设置</span>
+      <span class="top-spacer"></span>
+    </header>
+    <div class="me-list">
+      <div class="me-item">
+        <span>下载路径</span>
+        <span class="me-path" id="setting-path">/storage/emulated/0/SakuraAnime</span>
+      </div>
+      <div class="me-item" onclick="changeDownloadPath()">
+        <span>📁 修改下载路径</span><span class="me-arrow">›</span>
+      </div>
+      <div class="me-item">
+        <span>当前域名</span>
+        <span class="me-path" id="setting-domain">检测中...</span>
+      </div>
+      <div class="me-item" onclick="window.Sakura.refreshDomain()">
+        <span>🔄 重新检测域名</span><span class="me-arrow">›</span>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- Toast -->
+<div id="toast" class="toast"></div>
+
+<script src="js/app.js"></script>
+<script src="js/pages/home.js"></script>
+<script src="js/pages/search.js"></script>
+<script src="js/pages/detail.js"></script>
+<script src="js/pages/local.js"></script>
+<script src="js/pages/follow.js"></script>
+<script src="js/pages/settings.js"></script>
+</body>
+</html>
