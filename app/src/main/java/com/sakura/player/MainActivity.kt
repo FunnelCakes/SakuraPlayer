@@ -554,19 +554,23 @@ class MainActivity : AppCompatActivity() {
         @JavascriptInterface fun playOnline(videoId: Long, title: String, epIndex: Int, callbackId: String) {
             runOnUiThread { bridge.playOnline(videoId, title, epIndex, callbackId) }
         }
-        @JavascriptInterface fun playOnlineNative(videoId: Long, title: String, epIndex: Int, episodesJson: String) {
+        @JavascriptInterface fun playOnlineNative(videoId: Long, title: String, epIndex: Int,
+                                                   episodesJson: String, xPx: Int, yPx: Int, wPx: Int, hPx: Int) {
             runOnUiThread {
                 currentVideoId = videoId
                 currentTitle = title
                 currentEpisodesJson = episodesJson
 
-                // Parse episodes and configure player
+                // Position SakuraPlayerView over the WebView's #player-area
+                val params = sakuraPlayer.layoutParams as FrameLayout.LayoutParams
+                params.leftMargin = xPx
+                params.topMargin = yPx
+                params.width = wPx
+                params.height = hPx
+                sakuraPlayer.layoutParams = params
+
                 val episodes = parseEpisodesFromJson(episodesJson)
-                val config = PlayerConfig(
-                    mode = PlayerMode.INLINE,
-                    title = title,
-                    episodes = episodes
-                )
+                val config = PlayerConfig(mode = PlayerMode.INLINE, title = title, episodes = episodes)
                 sakuraPlayer.setup(config)
                 sakuraPlayer.visibility = View.VISIBLE
 

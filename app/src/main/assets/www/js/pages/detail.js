@@ -151,12 +151,21 @@ function playEpisode(epIndex) {
         }
     } else {
         // Online streaming: use native SakuraPlayer (ExoPlayer + B站 gesture controls)
+        var playerArea = $('#player-area');
+        var rect = playerArea.getBoundingClientRect();
+        var dpr = window.devicePixelRatio || 1;
+        var xPx = Math.round(rect.left * dpr);
+        var yPx = Math.round(rect.top * dpr);
+        var wPx = Math.round(rect.width * dpr);
+        var hPx = Math.round(rect.height * dpr);
+
         var episodesJson = buildEpisodesJson();
         window.Sakura.playOnlineNative(
             window.currentDetail.videoId,
             window.currentDetail.title,
             epIndex,
-            episodesJson
+            episodesJson,
+            xPx, yPx, wPx, hPx
         );
         // Native player will handle loading UI via onStateChanged callback
     }
