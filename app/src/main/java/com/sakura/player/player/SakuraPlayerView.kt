@@ -1,9 +1,13 @@
 package com.sakura.player.player
 
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import android.util.AttributeSet
+import android.view.Gravity
 import android.widget.FrameLayout
 import com.sakura.player.player.control.CenterHint
+import com.sakura.player.player.control.ControlBar
 import com.sakura.player.player.control.SideHUD
 import com.sakura.player.player.gesture.GestureOverlay
 
@@ -17,6 +21,7 @@ class SakuraPlayerView @JvmOverloads constructor(
     private lateinit var centerHint: CenterHint
     private lateinit var brightnessHud: SideHUD
     private lateinit var volumeHud: SideHUD
+    private lateinit var controlBar: ControlBar
 
     /** Callback when user requests fullscreen toggle */
     var onFullscreenRequest: (() -> Unit)? = null
@@ -33,30 +38,61 @@ class SakuraPlayerView @JvmOverloads constructor(
         val speed: Float
     )
 
+    // Track drag state during progress-bar seeking
+    private var isDragging = false
+    private var dragTargetMs: Long = 0L
+
+    // Progress update loop (runs every 250ms while playing and not dragging)
+    private val progressHandler = Handler(Looper.getMainLooper())
+    private val progressRunnable = object : Runnable {
+        override fun run() {
+            if (playerLayer.isPlaying && !isDragging) {
+                val pos = playerLayer.currentPosition
+                val dur = playerLayer.duration
+                controlBar.duration = dur
+                controlBar.updateTime(pos, dur)
+                controlBar.updateProgress(
+                    pos.toFloat() / dur,
+                    playerLayer.getBufferedPercent() / 100f
+                )
+            }
+            progressHandler.postDelayed(this, 250)
+        }
+    }
+
     fun setup(config: PlayerConfig) {
         this.config = config
         removeAllViews()
         buildLayers()
     }
 
-    fun play(m3u8Url: String) { playerLayer.play(m3u8Url) }
+    fun play(m3u8Url: String) {
+        playerLayer.play(m3u8Url)
+        progressHandler.post(progressRunnable)
+    }
 
-    fun playLocal(uri: android.net.Uri) { playerLayer.playLocal(uri) }
+    fun playLocal(uri: android.net.Uri) {
+        playerLayer.playLocal(uri)
+        progressHandler.post(progressRunnable)
+    }
 
-    fun release() { playerLayer.release() }
+    fun release() {
+        progressHandler.removeCallbacks(progressRunnable)
+        playerLayer.release()
+    }
 
     fun togglePlayPause() { playerLayer.togglePlayPause() }
 
     fun showControls() {
-        // Task 5
+        controlBar.show()
     }
 
     fun hideControls() {
-        // Task 5
+        controlBar.hide()
     }
 
     fun setLocked(locked: Boolean) {
-        // Task 5
+        gestureOverlay.locked = locked
     }
 
     // ── Bridge methods: Layer 3 CenterHint ──
@@ -74,6 +110,14 @@ class SakuraPlayerView @JvmOverloads constructor(
 
     private fun showVolumeHud(value: Int) =
         volumeHud.show(SideHUD.Type.VOLUME, value)
+
+    private fun showEpisodePanel() {
+        // Implemented in a future task
+    }
+
+    private fun showSpeedPanel() {
+        // Implemented in a future task
+    }
 
     private fun buildLayers() {
         // Layer 1: Video surface
@@ -150,5 +194,47 @@ class SakuraPlayerView @JvmOverloads constructor(
         volumeHud = SideHUD(context, false)
         addView(brightnessHud)
         addView(volumeHud)
+
+        // ── Layer 5: Control bar (progress track + time labels + buttons) ──
+        controlBar = ControlBar(context).apply {
+            onPlayPause = { playerLayer.togglePlayPause() }
+            onPrev = {
+                // Implemented in Task 7 (playlist manager)
+            }
+            onNext = {
+                // Implemented in Task 7 (playlist manager)
+            }
+            onFullscreen = { onFullscreenRequest?.invoke() }
+            onEpisodes = { showEpisodePanel() }
+            onSpeed = { showSpeedPanel() }
+
+            onSeekStart = {
+                this@SakuraPlayerView.isDragging = true
+                gestureOverlay.seekingEnabled = false
+            }
+            onSeek = { fraction ->
+                dragTargetMs = fraction
+                playerLayer.seekTo(fraction)
+            }
+            onSeekEnd = {
+                this@SakuraPlayerView.isDragging = false
+                gestureOverlay.seekingEnabled = true
+                playerLayer.seekTo(dragTargetMs)
+            }
+            onFineSeek = { delta ->
+                // delta is in seconds from ProgressTrack
+                val newPos = dragTargetMs + (delta * 1000).toLong()
+                dragTargetMs = newPos
+                playerLayer.seekTo(newPos)
+            }
+
+            setShowFullUI(config.mode == PlayerMode.FULLSCREEN)
+        }
+        addView(
+            controlBar,
+            LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+                gravity = Gravity.BOTTOM
+            }
+        )
     }
 }
