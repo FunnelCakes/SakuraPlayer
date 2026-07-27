@@ -3,6 +3,7 @@ package com.sakura.player.player
 import android.content.Context
 import android.util.AttributeSet
 import android.widget.FrameLayout
+import com.sakura.player.player.gesture.GestureOverlay
 
 class SakuraPlayerView @JvmOverloads constructor(
     context: Context, attrs: AttributeSet? = null, defStyleAttr: Int = 0
@@ -10,6 +11,7 @@ class SakuraPlayerView @JvmOverloads constructor(
 
     private var config: PlayerConfig = PlayerConfig(PlayerMode.INLINE)
     private lateinit var playerLayer: PlayerLayer
+    private lateinit var gestureOverlay: GestureOverlay
 
     /** Callback when user requests fullscreen toggle */
     var onFullscreenRequest: (() -> Unit)? = null
@@ -77,6 +79,42 @@ class SakuraPlayerView @JvmOverloads constructor(
             // Error handling will be added in future tasks
         }
         addView(playerLayer.playerView, LayoutParams(
+            LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT
+        ))
+
+        // Layer 2: Gesture overlay (transparent)
+        gestureOverlay = GestureOverlay(context).apply {
+            listener = object : GestureOverlay.GestureListener {
+                override fun onSingleTap() {
+                    // Task 7: toggle control visibility
+                }
+                override fun onDoubleTap() {
+                    playerLayer.togglePlayPause()
+                }
+                override fun onLongPressStart() {
+                    playerLayer.setSpeed(2f)
+                }
+                override fun onLongPressEnd() {
+                    playerLayer.setSpeed(1f)
+                }
+                override fun onBrightnessChange(delta: Float) {
+                    // Task 7: adjust screen brightness
+                }
+                override fun onVolumeChange(delta: Float) {
+                    // Task 7: adjust system volume
+                }
+                override fun onSeek(deltaSeconds: Float) {
+                    // Task 7: show seek preview
+                }
+                override fun onSeekEnd() {
+                    // Task 7: commit seek position
+                }
+                override fun onProgressFineSeek(deltaSeconds: Float) {
+                    // Task 7: fine seek adjustment
+                }
+            }
+        }
+        addView(gestureOverlay, LayoutParams(
             LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT
         ))
     }
