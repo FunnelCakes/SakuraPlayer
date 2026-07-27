@@ -10,6 +10,8 @@ import com.sakura.player.player.control.CenterHint
 import com.sakura.player.player.control.ControlBar
 import com.sakura.player.player.control.SideHUD
 import com.sakura.player.player.gesture.GestureOverlay
+import com.sakura.player.player.panel.EpisodePanel
+import com.sakura.player.player.panel.SpeedPanel
 
 class SakuraPlayerView @JvmOverloads constructor(
     context: Context, attrs: AttributeSet? = null, defStyleAttr: Int = 0
@@ -22,6 +24,10 @@ class SakuraPlayerView @JvmOverloads constructor(
     private lateinit var brightnessHud: SideHUD
     private lateinit var volumeHud: SideHUD
     private lateinit var controlBar: ControlBar
+    private lateinit var episodePanel: EpisodePanel
+    private lateinit var speedPanel: SpeedPanel
+    private var currentSpeed: Float = 1.0f
+    private var currentEpisodeIndex = 0
 
     /** Callback when user requests fullscreen toggle */
     var onFullscreenRequest: (() -> Unit)? = null
@@ -112,11 +118,11 @@ class SakuraPlayerView @JvmOverloads constructor(
         volumeHud.show(SideHUD.Type.VOLUME, value)
 
     private fun showEpisodePanel() {
-        // Implemented in a future task
+        episodePanel.toggle(config.episodes, currentEpisodeIndex)
     }
 
     private fun showSpeedPanel() {
-        // Implemented in a future task
+        speedPanel.toggle(currentSpeed)
     }
 
     private fun buildLayers() {
@@ -236,5 +242,21 @@ class SakuraPlayerView @JvmOverloads constructor(
                 gravity = Gravity.BOTTOM
             }
         )
+
+        // ── Layer 6: Slide-out panels (episode & speed selectors) ──
+        episodePanel = EpisodePanel(context).apply {
+            onEpisodeSelected = { idx ->
+                currentEpisodeIndex = idx
+                onEpisodeChange?.invoke(idx)
+            }
+        }
+        speedPanel = SpeedPanel(context).apply {
+            onSpeedSelected = { speed ->
+                currentSpeed = speed
+                playerLayer.setSpeed(speed)
+            }
+        }
+        addView(episodePanel, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
+        addView(speedPanel, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
     }
 }
