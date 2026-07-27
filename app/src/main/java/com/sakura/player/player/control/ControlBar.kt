@@ -204,6 +204,21 @@ class ControlBar(context: Context) : LinearLayout(context) {
     /** Whether the user is currently dragging the progress dot. */
     val isDragging: Boolean get() = progressTrack.isDragging
 
+    /** Show preview bubble for gesture-based seek (positionMs, totalMs). */
+    fun showPreview(positionMs: Long, totalMs: Long) {
+        previewBubble.text = "${formatTime(positionMs)} / ${formatTime(totalMs)}"
+        previewBubble.visibility = View.VISIBLE
+        post {
+            previewBubble.x = (width - previewBubble.measuredWidth) / 2f
+            previewBubble.y = -previewBubble.measuredHeight - 8f
+        }
+    }
+
+    /** Hide the gesture-seek preview bubble. */
+    fun hidePreview() {
+        previewBubble.visibility = View.GONE
+    }
+
     // ── Internal helpers ──
 
     private fun makeLabel(text: String, size: Float, color: Int): TextView {

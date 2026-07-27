@@ -51,6 +51,10 @@ class GestureOverlay @JvmOverloads constructor(
         fun onSeek(deltaSeconds: Float)          // relative seek in seconds
         fun onSeekEnd()
         fun onProgressFineSeek(deltaSeconds: Float)
+        /** Called when any gesture type is first determined (after touch slop). */
+        fun onGestureStart() {}
+        /** Called on ACTION_UP / ACTION_CANCEL regardless of gesture type. */
+        fun onGestureEnd() {}
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
@@ -88,6 +92,7 @@ class GestureOverlay @JvmOverloads constructor(
                         downX > width * 0.75f -> GestureType.VOLUME
                         else -> GestureType.SEEK
                     }
+                    listener?.onGestureStart()
                     if (gestureType != GestureType.SEEK) {
                         handler.removeCallbacks(longPressRunnable!!)
                     }
@@ -144,13 +149,16 @@ class GestureOverlay @JvmOverloads constructor(
                 if (gestureType == GestureType.SEEK) {
                     listener?.onSeekEnd()
                 }
+                val had = gestureType
                 gestureType = null
+                if (had != null || longPressFired) listener?.onGestureEnd()
             }
 
             MotionEvent.ACTION_CANCEL -> {
                 handler.removeCallbacks(longPressRunnable!!)
                 if (longPressFired) listener?.onLongPressEnd()
                 gestureType = null
+                listener?.onGestureEnd()
             }
         }
         return true

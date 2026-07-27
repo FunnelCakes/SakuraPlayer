@@ -1,162 +1,133 @@
 package com.sakura.player.player
 
-import android.annotation.SuppressLint
 import android.content.pm.ActivityInfo
+import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
-import android.view.*
-import android.webkit.*
-import android.widget.FrameLayout
+import android.view.View
+import android.view.WindowInsets
+import android.view.WindowInsetsController
+import android.view.WindowManager
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.FileProvider
-import androidx.media3.common.MediaItem
-import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.ui.AspectRatioFrameLayout
-import androidx.media3.ui.PlayerView
 import com.sakura.player.bridge.JsBridge
+import org.json.JSONArray
 import java.io.File
 
+/**
+ * Fullscreen player activity using SakuraPlayerView (ExoPlayer + B站-style gesture UI).
+ *
+ * Supports three playback sources:
+ *   - "online": direct m3u8 URL
+ *   - "local":  file path, converted to FileProvider content:// URI
+ *   - "url":    already-resolved content:// URI
+ */
 class PlayerActivity : AppCompatActivity() {
 
-    private val handler = Handler(Looper.getMainLooper())
-    private var exoPlayer: ExoPlayer? = null
-    private var playerView: PlayerView? = null
+    private lateinit var player: SakuraPlayerView
 
     companion object {
         const val EXTRA_SOURCE = "source"
         const val EXTRA_URL = "url"
         const val EXTRA_PATH = "path"
         const val EXTRA_TITLE = "title"
-        const val EXTRA_DIR = "dir"
+        const val EXTRA_POSITION = "position"
+        const val EXTRA_EPISODES = "episodes"
         const val EXTRA_VIDEO_ID = "videoId"
     }
 
-    @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        // Force landscape, keep screen on
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        hideSystemUI()
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            window.attributes.layoutInDisplayCutoutMode =
-                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
-        }
+        player = SakuraPlayerView(this)
+        setContentView(player)
 
         val source = intent.getStringExtra(EXTRA_SOURCE) ?: "online"
+        val title = intent.getStringExtra(EXTRA_TITLE) ?: ""
+        val position = intent.getLongExtra(EXTRA_POSITION, 0)
+        val episodesJson = intent.getStringExtra(EXTRA_EPISODES) ?: "[]"
 
-        if (source == "local" || source == "url") {
-            setupLocalPlayer(source)
-        } else {
-            setupWebViewPlayer()
-        }
-    }
+        val config = PlayerConfig(
+            mode = PlayerMode.FULLSCREEN,
+            title = title,
+            episodes = parseEpisodes(episodesJson)
+        )
+        player.setup(config)
 
-    private fun setupLocalPlayer(source: String) {
-        val uri = when (source) {
+        // Resolve and play
+        when (source) {
             "local" -> {
                 val path = intent.getStringExtra(EXTRA_PATH) ?: ""
                 val file = File(path)
                 if (file.exists()) {
-                    FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
+                    val uri = FileProvider.getUriForFile(
+                        this,
+                        "${packageName}.fileprovider",
+                        file
+                    )
+                    player.playLocal(uri)
                 } else {
-                    Uri.EMPTY
+                    finish()
                 }
             }
             "url" -> {
                 val url = intent.getStringExtra(EXTRA_URL) ?: ""
-                Uri.parse(url)
+                player.playLocal(Uri.parse(url))
             }
-            else -> Uri.EMPTY
-        }
-
-        if (uri == Uri.EMPTY) {
-            finish()
-            return
-        }
-
-        playerView = PlayerView(this).apply {
-            useController = true
-            controllerAutoShow = true
-            controllerShowTimeoutMs = 3000
-            resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
-            setBackgroundColor(0xFF000000.toInt())
-        }
-        setContentView(playerView!!)
-
-        val positionMs = intent.getLongExtra("position", 0)
-
-        exoPlayer = ExoPlayer.Builder(this).build().apply {
-            setMediaItem(MediaItem.fromUri(uri))
-            prepare()
-            playWhenReady = true
-            if (positionMs > 0) {
-                seekTo(positionMs)
-            }
-        }
-        playerView!!.player = exoPlayer
-
-        hideSystemUI()
-    }
-
-    @SuppressLint("SetJavaScriptEnabled")
-    private fun setupWebViewPlayer() {
-        val webView = WebView(this).apply {
-            layoutParams = FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT
-            )
-
-            setBackgroundColor(0xFF000000.toInt())
-
-            settings.apply {
-                javaScriptEnabled = true
-                domStorageEnabled = true
-                allowFileAccess = true
-                allowContentAccess = true
-                mediaPlaybackRequiresUserGesture = false
-                setSupportZoom(false)
-                builtInZoomControls = false
-                useWideViewPort = true
-                loadWithOverviewMode = true
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                    mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-                }
-            }
-
-            // Hide system bars on user interaction
-            setOnSystemUiVisibilityChangeListener { visibility ->
-                if (visibility and View.SYSTEM_UI_FLAG_FULLSCREEN == 0) {
-                    // System bars visible -- hide after 3s
-                    handler.postDelayed({ hideSystemUI() }, 3000)
-                }
-            }
-
-            webChromeClient = object : WebChromeClient() {
-                override fun onShowCustomView(view: View?, callback: CustomViewCallback?) {
-                    super.onShowCustomView(view, callback)
-                    hideSystemUI()
+            "online" -> {
+                val url = intent.getStringExtra(EXTRA_URL) ?: ""
+                if (url.isNotEmpty()) {
+                    player.play(url)
                 }
             }
         }
 
-        setContentView(webView)
+        // Restore position if provided
+        if (position > 0) {
+            player.exoPlayer?.seekTo(position)
+        }
 
-        val url = intent.getStringExtra(EXTRA_URL) ?: ""
-
-        val videoParam = if (url.isNotEmpty()) url else ""
-        webView.loadUrl("file:///android_asset/www/fullplayer.html?url=${Uri.encode(videoParam)}")
-        hideSystemUI()
+        // Exit fullscreen on back
+        player.onFullscreenRequest = { finish() }
     }
 
-    override fun onWindowFocusChanged(hasFocus: Boolean) {
-        super.onWindowFocusChanged(hasFocus)
-        if (hasFocus) hideSystemUI()
+    private fun parseEpisodes(json: String): List<EpisodeItem> {
+        val list = mutableListOf<EpisodeItem>()
+        try {
+            val arr = JSONArray(json)
+            for (i in 0 until arr.length()) {
+                val obj = arr.getJSONObject(i)
+                list.add(
+                    EpisodeItem(
+                        index = obj.getInt("index"),
+                        name = obj.getString("name"),
+                        path = obj.optString("path", ""),
+                        videoId = obj.optLong("videoId", 0),
+                        isLocal = obj.optBoolean("isLocal", false)
+                    )
+                )
+            }
+        } catch (_: Exception) {}
+        return list
     }
 
+    override fun onDestroy() {
+        // Save playback position for resume in MainActivity
+        val finalPos = player.exoPlayer?.currentPosition ?: 0
+        if (finalPos > 0) {
+            JsBridge.lastFullscreenPosition = finalPos
+        }
+        player.release()
+        super.onDestroy()
+    }
+
+    /** Hide system bars in immersive sticky mode for true fullscreen. */
     private fun hideSystemUI() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             window.insetsController?.hide(WindowInsets.Type.systemBars())
@@ -173,23 +144,5 @@ class PlayerActivity : AppCompatActivity() {
                 View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
             )
         }
-    }
-
-    override fun onStop() {
-        super.onStop()
-        exoPlayer?.pause()
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
-        val finalPos = exoPlayer?.currentPosition ?: 0
-        if (finalPos > 0) {
-            JsBridge.lastFullscreenPosition = finalPos
-        }
-        exoPlayer?.stop()
-        exoPlayer?.release()
-        exoPlayer = null
-        playerView?.player = null
-        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
     }
 }

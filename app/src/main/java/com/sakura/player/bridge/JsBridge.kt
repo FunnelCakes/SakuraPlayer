@@ -235,6 +235,30 @@ class JsBridge(private val ctx: Context) {
         }
     }
 
+    /** Suspend version: resolve the best m3u8 URL for native playback. Returns null on failure. */
+    suspend fun resolveM3u8Url(videoId: Long, epIndex: Int): String? {
+        return withContext(Dispatchers.IO) {
+            try {
+                val detail = AnimeScraper.getDetail(domain, videoId)
+                val trySids = if (detail.sourceIds.isNotEmpty()) detail.sourceIds else listOf(1)
+                val entries = mutableListOf<Pair<Int, String>>()
+                for (sid in trySids) {
+                    try {
+                        val vu = VideoExtractor.extractFromPlayPage(domain, videoId, epIndex, sid)
+                        if (vu.m3u8Url.isNotEmpty()) {
+                            entries.add(sid to vu.m3u8Url)
+                        }
+                    } catch (_: Exception) {}
+                }
+                if (entries.isEmpty()) return@withContext null
+                if (entries.size == 1) entries[0].second
+                else raceStreamingCdns(entries)
+            } catch (_: Exception) {
+                null
+            }
+        }
+    }
+
     /** Race multiple CDNs: probe each for 1.5s, return the fastest one's m3u8 URL */
     private suspend fun raceStreamingCdns(
         entries: List<Pair<Int, String>>, sampleMs: Long = 1500

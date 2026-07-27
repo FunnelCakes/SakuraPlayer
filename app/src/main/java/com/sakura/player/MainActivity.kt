@@ -33,7 +33,10 @@ import com.sakura.player.data.SettingsPrefs
 import com.sakura.player.download.DownloadManager
 import com.sakura.player.follow.FollowManager
 import com.sakura.player.follow.UpdateChecker
+import com.sakura.player.player.*
 import kotlinx.coroutines.*
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.File
 
 class MainActivity : AppCompatActivity() {
@@ -46,6 +49,14 @@ class MainActivity : AppCompatActivity() {
     private lateinit var localPlayerView: PlayerView
     private var exoPlayer: ExoPlayer? = null
     @Volatile private var cachedPlayerState: String = "{}"
+
+    // SakuraPlayer — 6-layer native player for inline + fullscreen playback
+    private lateinit var sakuraPlayer: SakuraPlayerView
+    private lateinit var playerBridge: PlayerBridge
+    private var currentM3u8Url: String = ""
+    private var currentTitle: String = ""
+    private var currentVideoId: Long = 0
+    private var currentEpisodesJson: String = "[]"
 
     // SAF directory picker for custom download path
     private val safPickerLauncher = registerForActivityResult(
@@ -202,9 +213,51 @@ class MainActivity : AppCompatActivity() {
             resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
             setBackgroundColor(0xFF000000.toInt())
         }
-        // Add views to root: WebView first (bottom), PlayerView on top
+
+        // Create SakuraPlayerView (6-layer B站-style player) — hidden until playback starts
+        sakuraPlayer = SakuraPlayerView(this).apply {
+            visibility = View.GONE
+            onFullscreenRequest = {
+                val pos = exoPlayer?.currentPosition ?: sakuraPlayer.getPlayerState().position
+                val episodesJson = buildEpisodesJson()
+                val intent = Intent(this@MainActivity, PlayerActivity::class.java).apply {
+                    putExtra(PlayerActivity.EXTRA_SOURCE, "online")
+                    putExtra(PlayerActivity.EXTRA_URL, currentM3u8Url)
+                    putExtra(PlayerActivity.EXTRA_TITLE, currentTitle)
+                    putExtra(PlayerActivity.EXTRA_POSITION, pos)
+                    putExtra(PlayerActivity.EXTRA_EPISODES, episodesJson)
+                }
+                startActivity(intent)
+            }
+            onEpisodeChange = { idx ->
+                evalJs("if(window.onPlayerEpisodeChange)window.onPlayerEpisodeChange($idx)")
+            }
+            onStateChanged = { state ->
+                // Sync state back to JS if needed
+                val json = JSONObject().apply {
+                    put("playing", state.playing)
+                    put("position", state.position)
+                    put("duration", state.duration)
+                    put("currentEp", state.currentEp)
+                    put("speed", state.speed.toDouble())
+                }.toString()
+                evalJs("if(window.onPlayerStateChanged)window.onPlayerStateChanged($json)")
+            }
+        }
+
+        // Add views to root in correct z-order: WebView (bottom), PlayerView (mid), SakuraPlayer (top)
         rootLayout.addView(webView)
         rootLayout.addView(localPlayerView)
+        rootLayout.addView(sakuraPlayer)
+
+        playerBridge = PlayerBridge(
+            player = sakuraPlayer,
+            context = this@MainActivity,
+            jsEvaluator = { js -> evalJs(js) },
+            m3u8Resolver = { videoId, title, epIndex, callback ->
+                bridge.playOnline(videoId, title, epIndex, callback)
+            }
+        )
 
         setContentView(rootLayout)
         Log.e("SakuraMain", "App started, WebView created, loading frontend")
@@ -501,6 +554,37 @@ class MainActivity : AppCompatActivity() {
         @JavascriptInterface fun playOnline(videoId: Long, title: String, epIndex: Int, callbackId: String) {
             runOnUiThread { bridge.playOnline(videoId, title, epIndex, callbackId) }
         }
+        @JavascriptInterface fun playOnlineNative(videoId: Long, title: String, epIndex: Int, episodesJson: String) {
+            runOnUiThread {
+                currentVideoId = videoId
+                currentTitle = title
+                currentEpisodesJson = episodesJson
+
+                // Parse episodes and configure player
+                val episodes = parseEpisodesFromJson(episodesJson)
+                val config = PlayerConfig(
+                    mode = PlayerMode.INLINE,
+                    title = title,
+                    episodes = episodes
+                )
+                sakuraPlayer.setup(config)
+                sakuraPlayer.visibility = View.VISIBLE
+
+                // Resolve m3u8 URL (with CDN race) and play in SakuraPlayer
+                scope.launch(Dispatchers.IO) {
+                    val m3u8Url = bridge.resolveM3u8Url(videoId, epIndex)
+                    withContext(Dispatchers.Main) {
+                        if (m3u8Url != null) {
+                            currentM3u8Url = m3u8Url
+                            sakuraPlayer.play(m3u8Url)
+                        } else {
+                            evalJs("if(window.showToast)window.showToast('无法获取播放地址')")
+                            sakuraPlayer.visibility = View.GONE
+                        }
+                    }
+                }
+            }
+        }
         @JavascriptInterface fun openFullscreen(videoId: Long, title: String, epIndex: Int, callbackId: String) {
             runOnUiThread { bridge.openFullscreen(videoId, title, epIndex, callbackId) }
         }
@@ -587,6 +671,12 @@ class MainActivity : AppCompatActivity() {
         @JavascriptInterface fun getDiscover(page: Int, callbackId: String) {
             runOnUiThread { bridge.getDiscover(page, callbackId) }
         }
+        @JavascriptInterface fun setSakuraPlayerVisible(visible: Boolean) {
+            runOnUiThread {
+                sakuraPlayer.visibility = if (visible) View.VISIBLE else View.GONE
+                if (!visible) sakuraPlayer.release()
+            }
+        }
     }
 
     // ==================== Helpers ====================
@@ -598,13 +688,44 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /** Parse episode JSON array into EpisodeItem list. */
+    private fun parseEpisodesFromJson(json: String): List<EpisodeItem> {
+        val list = mutableListOf<EpisodeItem>()
+        try {
+            val arr = JSONArray(json)
+            for (i in 0 until arr.length()) {
+                val obj = arr.getJSONObject(i)
+                list.add(
+                    EpisodeItem(
+                        index = obj.getInt("index"),
+                        name = obj.getString("name"),
+                        path = obj.optString("path", ""),
+                        videoId = obj.optLong("videoId", 0),
+                        isLocal = obj.optBoolean("isLocal", false)
+                    )
+                )
+            }
+        } catch (_: Exception) {}
+        return list
+    }
+
+    /** Build episodes JSON from cached field for fullscreen handoff. */
+    private fun buildEpisodesJson(): String {
+        return currentEpisodesJson
+    }
+
     override fun onResume() {
         super.onResume()
 
-        // Resume half-screen player from fullscreen position if returning from PlayerActivity
+        // Resume SakuraPlayer from fullscreen position if returning from PlayerActivity
         val resumePos = JsBridge.lastFullscreenPosition
         if (resumePos > 0) {
             JsBridge.lastFullscreenPosition = 0
+            sakuraPlayer.exoPlayer?.let {
+                it.seekTo(resumePos.coerceIn(0, it.duration))
+                it.playWhenReady = true
+            }
+            // Also resume legacy exoPlayer if active
             exoPlayer?.let {
                 it.seekTo(resumePos.coerceIn(0, it.duration))
                 it.play()
@@ -627,6 +748,8 @@ class MainActivity : AppCompatActivity() {
         exoPlayer?.stop()
         exoPlayer?.release()
         exoPlayer = null
+        // Release SakuraPlayer
+        if (::sakuraPlayer.isInitialized) sakuraPlayer.release()
         super.onDestroy()
     }
 

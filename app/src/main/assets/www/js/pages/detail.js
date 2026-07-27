@@ -91,6 +91,8 @@ function resetPlayer() {
     if (window.LocalPlayer) {
         try { window.LocalPlayer.release(); } catch(e) {}
     }
+    // Hide native SakuraPlayer
+    try { window.Sakura.setSakuraPlayerVisible(false); } catch(e) {}
     // Clear global document-level pointer handlers to avoid stale handler conflicts
     document.onpointermove = null;
     document.onpointerup = null;
@@ -134,8 +136,9 @@ function playEpisode(epIndex) {
     const v = $('#detail-video');
     $('#player-cover').style.display = 'none';
     $('#player-loading').style.display = '';
-    // Hide video element initially; will be shown for online, hidden for local
+    // Hide video element & WebView controls — native SakuraPlayer handles UI
     v.style.display = 'none';
+    $('#player-ctrls').style.display = 'none';
 
     if (window.currentDetail.isLocal) {
         const ep = window.currentDetail.episodes?.find(e => e.index === epIndex);
@@ -147,21 +150,29 @@ function playEpisode(epIndex) {
             $('#player-loading').style.display = 'none';
         }
     } else {
-        // Online streaming: use WebView <video> element
-        v.style.display = 'block';
-        callNativeLegacy('playOnline', window.currentDetail.videoId, window.currentDetail.title, epIndex).then(data => {
-            if (data && data.m3u8Url) {
-                bindPlayer(v);
-                v.src = data.m3u8Url;
-            } else {
-                showToast('无法获取播放地址');
-                $('#player-loading').style.display = 'none';
-            }
-        }).catch(e => {
-            handleApiError(e);
-            $('#player-loading').style.display = 'none';
-        });
+        // Online streaming: use native SakuraPlayer (ExoPlayer + B站 gesture controls)
+        var episodesJson = buildEpisodesJson();
+        window.Sakura.playOnlineNative(
+            window.currentDetail.videoId,
+            window.currentDetail.title,
+            epIndex,
+            episodesJson
+        );
+        // Native player will handle loading UI via onStateChanged callback
     }
+}
+
+function buildEpisodesJson() {
+    if (!window.currentDetail || !window.currentDetail.episodes) return '[]';
+    return JSON.stringify(window.currentDetail.episodes.map(function(ep) {
+        return {
+            index: ep.index,
+            name: ep.name,
+            path: ep.path || '',
+            videoId: window.currentDetail.videoId || 0,
+            isLocal: window.currentDetail.isLocal || false
+        };
+    }));
 }
 
 // ==================== ExoPlayer Local File Playback ====================
@@ -578,6 +589,24 @@ async function checkFollowStatus(videoId) {
     } catch(e) {}
 }
 
+// ==================== Native SakuraPlayer callbacks ====================
+
+/** Called by native when SakuraPlayer state changes (playing/position/duration etc.). */
+window.onPlayerStateChanged = function(json) {
+    try {
+        var state = JSON.parse(json);
+        window.playerState.playing = state.playing;
+        if (state.playing) {
+            $('#player-loading').style.display = 'none';
+        }
+    } catch(e) {}
+};
+
+/** Called by native when user switches episode via SakuraPlayer control bar. */
+window.onPlayerEpisodeChange = function(idx) {
+    playEpisode(idx);
+};
+
 // ==================== Overlay close hook - release ExoPlayer ====================
 
 (function() {
@@ -591,6 +620,8 @@ async function checkFollowStatus(videoId) {
         var top = (stack && stack.length > 0) ? stack[stack.length - 1] : null;
         if (top === 'detail') {
             resetPlayer();
+            // Hide native SakuraPlayer
+            try { window.Sakura.setSakuraPlayerVisible(false); } catch(e) {}
         }
         return origCloseOverlay.apply(this, arguments);
     };
@@ -602,6 +633,7 @@ async function checkFollowStatus(videoId) {
         var oldTop = (oldStack && oldStack.length > 0) ? oldStack[oldStack.length - 1] : null;
         if (oldTop === 'detail' && tab !== currentTab) {
             resetPlayer();
+            try { window.Sakura.setSakuraPlayerVisible(false); } catch(e) {}
         }
         return origSwitchTab.apply(this, arguments);
     };

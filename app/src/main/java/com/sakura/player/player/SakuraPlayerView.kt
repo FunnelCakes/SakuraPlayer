@@ -1,10 +1,12 @@
 package com.sakura.player.player
 
 import android.content.Context
+import android.media.AudioManager
 import android.os.Handler
 import android.os.Looper
 import android.util.AttributeSet
 import android.view.Gravity
+import android.view.WindowManager
 import android.widget.FrameLayout
 import com.sakura.player.player.control.CenterHint
 import com.sakura.player.player.control.ControlBar
@@ -12,6 +14,7 @@ import com.sakura.player.player.control.SideHUD
 import com.sakura.player.player.gesture.GestureOverlay
 import com.sakura.player.player.panel.EpisodePanel
 import com.sakura.player.player.panel.SpeedPanel
+import kotlin.math.roundToInt
 
 class SakuraPlayerView @JvmOverloads constructor(
     context: Context, attrs: AttributeSet? = null, defStyleAttr: Int = 0
@@ -44,15 +47,28 @@ class SakuraPlayerView @JvmOverloads constructor(
         val speed: Float
     )
 
-    // Track drag state during progress-bar seeking
+    // ── Auto-hide controls ──
+    private val hideHandler = Handler(Looper.getMainLooper())
+    private val hideControlsRunnable = Runnable { hideControls() }
+    private var controlsVisible = true
+    private var isLocked = false
     private var isDragging = false
-    private var dragTargetMs: Long = 0L
 
-    // Progress update loop (runs every 250ms while playing and not dragging)
+    // ── Gesture state tracking ──
+    private var brightnessGestureActive = false
+    private var volumeGestureActive = false
+    private var gestureInitialBrightness = 0.5f
+    private var gestureInitialVolume = 0
+
+    // ── Seek preview state ──
+    private var pendingSeekPos: Long = 0
+    private var previousSpeed: Float = 1.0f
+
+    // ── Progress update loop (every 250ms while playing and not dragging) ──
     private val progressHandler = Handler(Looper.getMainLooper())
     private val progressRunnable = object : Runnable {
         override fun run() {
-            if (playerLayer.isPlaying && !isDragging) {
+            if (::playerLayer.isInitialized && playerLayer.isPlaying && !isDragging) {
                 val pos = playerLayer.currentPosition
                 val dur = playerLayer.duration
                 controlBar.duration = dur
@@ -66,11 +82,15 @@ class SakuraPlayerView @JvmOverloads constructor(
         }
     }
 
+    // ── Public API ──
+
     fun setup(config: PlayerConfig) {
         this.config = config
         removeAllViews()
         buildLayers()
     }
+
+    val exoPlayer get() = if (::playerLayer.isInitialized) playerLayer.player else null
 
     fun play(m3u8Url: String) {
         playerLayer.play(m3u8Url)
@@ -84,21 +104,134 @@ class SakuraPlayerView @JvmOverloads constructor(
 
     fun release() {
         progressHandler.removeCallbacks(progressRunnable)
-        playerLayer.release()
+        hideHandler.removeCallbacks(hideControlsRunnable)
+        if (::playerLayer.isInitialized) playerLayer.release()
     }
 
     fun togglePlayPause() { playerLayer.togglePlayPause() }
 
+    /** Get player state snapshot for JS bridge queries. */
+    fun getPlayerState(): PlayerState {
+        return PlayerState(
+            playing = if (::playerLayer.isInitialized) playerLayer.isPlaying else false,
+            position = if (::playerLayer.isInitialized) playerLayer.currentPosition else 0,
+            duration = if (::playerLayer.isInitialized) playerLayer.duration else 1,
+            currentEp = currentEpisodeIndex,
+            speed = currentSpeed
+        )
+    }
+
+    /** Update episode list without full rebuild. */
+    fun updateEpisodes(episodes: List<EpisodeItem>) {
+        config = config.copy(episodes = episodes)
+    }
+
+    // ── Control visibility ──
+
+    fun toggleControlVisibility() {
+        if (isLocked) return
+        if (controlsVisible) hideControls() else showControls()
+    }
+
     fun showControls() {
+        if (!::controlBar.isInitialized) return
+        controlsVisible = true
         controlBar.show()
+        resetHideTimer()
     }
 
     fun hideControls() {
+        if (!::controlBar.isInitialized) return
+        controlsVisible = false
         controlBar.hide()
+        hideHandler.removeCallbacks(hideControlsRunnable)
     }
 
     fun setLocked(locked: Boolean) {
-        gestureOverlay.locked = locked
+        isLocked = locked
+        if (::gestureOverlay.isInitialized) gestureOverlay.locked = locked
+        if (locked) {
+            hideControls()
+        } else {
+            showControls()
+        }
+    }
+
+    private fun resetHideTimer() {
+        hideHandler.removeCallbacks(hideControlsRunnable)
+        if (::playerLayer.isInitialized && playerLayer.isPlaying && !isDragging && !isLocked) {
+            hideHandler.postDelayed(hideControlsRunnable, 3000)
+        }
+    }
+
+    // ── Brightness control (via WindowManager.LayoutParams) ──
+
+    private fun getSystemBrightness(): Float {
+        return try {
+            val lp = (context as? android.app.Activity)?.window?.attributes
+            lp?.screenBrightness ?: WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE.toFloat()
+        } catch (_: Exception) {
+            0.5f
+        }
+    }
+
+    private fun adjustBrightness(delta: Float) {
+        if (!brightnessGestureActive) {
+            brightnessGestureActive = true
+            gestureInitialBrightness = getSystemBrightness()
+            if (gestureInitialBrightness < 0f) gestureInitialBrightness = 0.5f
+        }
+        val newBrightness = (gestureInitialBrightness + delta).coerceIn(0.01f, 1f)
+        try {
+            val lp = (context as? android.app.Activity)?.window?.attributes
+            if (lp != null) {
+                lp.screenBrightness = newBrightness
+                (context as android.app.Activity).window.attributes = lp
+            }
+        } catch (_: Exception) {}
+        showBrightnessHud((newBrightness * 100).roundToInt())
+    }
+
+    // ── Volume control (via AudioManager) ──
+
+    private fun getSystemVolume(): Int {
+        return try {
+            val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            am.getStreamVolume(AudioManager.STREAM_MUSIC)
+        } catch (_: Exception) { 7 }
+    }
+
+    private fun adjustVolume(delta: Float) {
+        if (!volumeGestureActive) {
+            volumeGestureActive = true
+            gestureInitialVolume = getSystemVolume()
+        }
+        try {
+            val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            val maxVol = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+            val newVol = (gestureInitialVolume + (delta * maxVol)).roundToInt().coerceIn(0, maxVol)
+            am.setStreamVolume(AudioManager.STREAM_MUSIC, newVol, 0)
+            showVolumeHud(if (maxVol > 0) (newVol * 100 / maxVol) else 0)
+        } catch (_: Exception) {}
+    }
+
+    // ── Seek preview ──
+
+    private fun seekPreview(deltaSeconds: Float) {
+        val pos = playerLayer.currentPosition + (deltaSeconds * 1000).toLong()
+        pendingSeekPos = pos.coerceIn(0, playerLayer.duration)
+        controlBar.showPreview(pendingSeekPos, playerLayer.duration)
+    }
+
+    private fun commitSeek() {
+        playerLayer.seekTo(pendingSeekPos)
+        controlBar.hidePreview()
+        resetHideTimer()
+    }
+
+    private fun fineSeek(delta: Float) {
+        val newPos = playerLayer.currentPosition + (delta * 100).toLong()
+        playerLayer.seekTo(newPos.coerceIn(0, playerLayer.duration))
     }
 
     // ── Bridge methods: Layer 3 CenterHint ──
@@ -117,6 +250,8 @@ class SakuraPlayerView @JvmOverloads constructor(
     private fun showVolumeHud(value: Int) =
         volumeHud.show(SideHUD.Type.VOLUME, value)
 
+    // ── Panel toggles ──
+
     private fun showEpisodePanel() {
         episodePanel.toggle(config.episodes, currentEpisodeIndex)
     }
@@ -124,6 +259,8 @@ class SakuraPlayerView @JvmOverloads constructor(
     private fun showSpeedPanel() {
         speedPanel.toggle(currentSpeed)
     }
+
+    // ── Layer construction ──
 
     private fun buildLayers() {
         // Layer 1: Video surface
@@ -147,7 +284,7 @@ class SakuraPlayerView @JvmOverloads constructor(
             ))
         }
         playerLayer.onError = { msg ->
-            // Error handling will be added in future tasks
+            android.util.Log.e("SakuraPlayerView", "Player error: $msg")
         }
         addView(playerLayer.playerView, LayoutParams(
             LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT
@@ -156,32 +293,30 @@ class SakuraPlayerView @JvmOverloads constructor(
         // Layer 2: Gesture overlay (transparent)
         gestureOverlay = GestureOverlay(context).apply {
             listener = object : GestureOverlay.GestureListener {
-                override fun onSingleTap() {
-                    // Task 7: toggle control visibility
-                }
+                override fun onSingleTap() { toggleControlVisibility() }
                 override fun onDoubleTap() {
                     playerLayer.togglePlayPause()
+                    showCenterHint(if (playerLayer.isPlaying) CenterHint.Type.PLAY else CenterHint.Type.PAUSE)
                 }
                 override fun onLongPressStart() {
+                    previousSpeed = currentSpeed
+                    currentSpeed = 2f
                     playerLayer.setSpeed(2f)
+                    showSpeedHint("2x 快放中")
                 }
                 override fun onLongPressEnd() {
-                    playerLayer.setSpeed(1f)
+                    currentSpeed = previousSpeed
+                    playerLayer.setSpeed(currentSpeed)
+                    hideSpeedHint()
                 }
-                override fun onBrightnessChange(delta: Float) {
-                    // Task 7: adjust screen brightness
-                }
-                override fun onVolumeChange(delta: Float) {
-                    // Task 7: adjust system volume
-                }
-                override fun onSeek(deltaSeconds: Float) {
-                    // Task 7: show seek preview
-                }
-                override fun onSeekEnd() {
-                    // Task 7: commit seek position
-                }
-                override fun onProgressFineSeek(deltaSeconds: Float) {
-                    // Task 7: fine seek adjustment
+                override fun onBrightnessChange(delta: Float) { adjustBrightness(delta) }
+                override fun onVolumeChange(delta: Float) { adjustVolume(delta) }
+                override fun onSeek(deltaSeconds: Float) { seekPreview(deltaSeconds) }
+                override fun onSeekEnd() { commitSeek() }
+                override fun onProgressFineSeek(delta: Float) { fineSeek(delta) }
+                override fun onGestureEnd() {
+                    brightnessGestureActive = false
+                    volumeGestureActive = false
                 }
             }
         }
@@ -201,14 +336,23 @@ class SakuraPlayerView @JvmOverloads constructor(
         addView(brightnessHud)
         addView(volumeHud)
 
-        // ── Layer 5: Control bar (progress track + time labels + buttons) ──
+        // Layer 5: Control bar (progress track + time labels + buttons)
         controlBar = ControlBar(context).apply {
             onPlayPause = { playerLayer.togglePlayPause() }
             onPrev = {
-                // Implemented in Task 7 (playlist manager)
+                // Navigate to previous episode
+                if (currentEpisodeIndex > 0 && config.episodes.isNotEmpty()) {
+                    currentEpisodeIndex--
+                    onEpisodeChange?.invoke(currentEpisodeIndex)
+                }
             }
             onNext = {
-                // Implemented in Task 7 (playlist manager)
+                // Navigate to next episode
+                val maxIdx = config.episodes.size - 1
+                if (currentEpisodeIndex < maxIdx) {
+                    currentEpisodeIndex++
+                    onEpisodeChange?.invoke(currentEpisodeIndex)
+                }
             }
             onFullscreen = { onFullscreenRequest?.invoke() }
             onEpisodes = { showEpisodePanel() }
@@ -216,19 +360,19 @@ class SakuraPlayerView @JvmOverloads constructor(
 
             onSeekStart = {
                 this@SakuraPlayerView.isDragging = true
-                gestureOverlay.seekingEnabled = false
+                if (::gestureOverlay.isInitialized) gestureOverlay.seekingEnabled = false
             }
             onSeek = { fraction ->
-                dragTargetMs = fraction
+                this@SakuraPlayerView.dragTargetMs = fraction
                 playerLayer.seekTo(fraction)
             }
             onSeekEnd = {
                 this@SakuraPlayerView.isDragging = false
-                gestureOverlay.seekingEnabled = true
+                if (::gestureOverlay.isInitialized) gestureOverlay.seekingEnabled = true
                 playerLayer.seekTo(dragTargetMs)
+                resetHideTimer()
             }
             onFineSeek = { delta ->
-                // delta is in seconds from ProgressTrack
                 val newPos = dragTargetMs + (delta * 1000).toLong()
                 dragTargetMs = newPos
                 playerLayer.seekTo(newPos)
@@ -243,7 +387,7 @@ class SakuraPlayerView @JvmOverloads constructor(
             }
         )
 
-        // ── Layer 6: Slide-out panels (episode & speed selectors) ──
+        // Layer 6: Slide-out panels (episode & speed selectors)
         episodePanel = EpisodePanel(context).apply {
             onEpisodeSelected = { idx ->
                 currentEpisodeIndex = idx
@@ -259,4 +403,7 @@ class SakuraPlayerView @JvmOverloads constructor(
         addView(episodePanel, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
         addView(speedPanel, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
     }
+
+    // Track drag state during progress-bar seeking
+    private var dragTargetMs: Long = 0L
 }
