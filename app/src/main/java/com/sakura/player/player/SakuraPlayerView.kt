@@ -3,18 +3,13 @@ package com.sakura.player.player
 import android.content.Context
 import android.util.AttributeSet
 import android.widget.FrameLayout
-import androidx.media3.common.Player
-import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.ui.PlayerView
 
 class SakuraPlayerView @JvmOverloads constructor(
     context: Context, attrs: AttributeSet? = null, defStyleAttr: Int = 0
 ) : FrameLayout(context, attrs, defStyleAttr) {
 
     private var config: PlayerConfig = PlayerConfig(PlayerMode.INLINE)
-    var exoPlayer: ExoPlayer? = null
-        private set
-    private lateinit var playerView: PlayerView
+    private lateinit var playerLayer: PlayerLayer
 
     /** Callback when user requests fullscreen toggle */
     var onFullscreenRequest: (() -> Unit)? = null
@@ -37,21 +32,13 @@ class SakuraPlayerView @JvmOverloads constructor(
         buildLayers()
     }
 
-    fun play(m3u8Url: String) {
-        // Task 2
-    }
+    fun play(m3u8Url: String) { playerLayer.play(m3u8Url) }
 
-    fun playLocal(uri: android.net.Uri) {
-        // Task 2
-    }
+    fun playLocal(uri: android.net.Uri) { playerLayer.playLocal(uri) }
 
-    fun release() {
-        // Task 2
-    }
+    fun release() { playerLayer.release() }
 
-    fun togglePlayPause() {
-        // Task 3
-    }
+    fun togglePlayPause() { playerLayer.togglePlayPause() }
 
     fun showControls() {
         // Task 5
@@ -66,6 +53,31 @@ class SakuraPlayerView @JvmOverloads constructor(
     }
 
     private fun buildLayers() {
-        // Implemented across Tasks 2-7
+        // Layer 1: Video surface
+        playerLayer = PlayerLayer(context)
+        playerLayer.onReady = {
+            onStateChanged?.invoke(PlayerState(
+                playing = true,
+                position = playerLayer.currentPosition,
+                duration = playerLayer.duration,
+                currentEp = 0,
+                speed = 1f
+            ))
+        }
+        playerLayer.onEnded = {
+            onStateChanged?.invoke(PlayerState(
+                playing = false,
+                position = playerLayer.currentPosition,
+                duration = playerLayer.duration,
+                currentEp = 0,
+                speed = 1f
+            ))
+        }
+        playerLayer.onError = { msg ->
+            // Error handling will be added in future tasks
+        }
+        addView(playerLayer.playerView, LayoutParams(
+            LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT
+        ))
     }
 }
