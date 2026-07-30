@@ -57,6 +57,8 @@ class MainActivity : AppCompatActivity() {
     private var currentTitle: String = ""
     private var currentVideoId: Long = 0
     private var currentEpisodesJson: String = "[]"
+    private var currentIsLocal: Boolean = false
+    private var currentFilePath: String = ""
 
     // SAF directory picker for custom download path
     private val safPickerLauncher = registerForActivityResult(
@@ -218,11 +220,16 @@ class MainActivity : AppCompatActivity() {
         sakuraPlayer = SakuraPlayerView(this).apply {
             visibility = View.GONE
             onFullscreenRequest = {
-                val pos = exoPlayer?.currentPosition ?: sakuraPlayer.getPlayerState().position
+                val pos = sakuraPlayer.getPlayerState().position
                 val episodesJson = buildEpisodesJson()
                 val intent = Intent(this@MainActivity, PlayerActivity::class.java).apply {
-                    putExtra(PlayerActivity.EXTRA_SOURCE, "online")
-                    putExtra(PlayerActivity.EXTRA_URL, currentM3u8Url)
+                    if (currentIsLocal) {
+                        putExtra(PlayerActivity.EXTRA_SOURCE, "local")
+                        putExtra(PlayerActivity.EXTRA_PATH, currentFilePath)
+                    } else {
+                        putExtra(PlayerActivity.EXTRA_SOURCE, "online")
+                        putExtra(PlayerActivity.EXTRA_URL, currentM3u8Url)
+                    }
                     putExtra(PlayerActivity.EXTRA_TITLE, currentTitle)
                     putExtra(PlayerActivity.EXTRA_POSITION, pos)
                     putExtra(PlayerActivity.EXTRA_EPISODES, episodesJson)
@@ -557,6 +564,7 @@ class MainActivity : AppCompatActivity() {
         @JavascriptInterface fun playOnlineNative(videoId: Long, title: String, epIndex: Int,
                                                    episodesJson: String, xPx: Int, yPx: Int, wPx: Int, hPx: Int) {
             runOnUiThread {
+                currentIsLocal = false; currentFilePath = ""
                 currentVideoId = videoId
                 currentTitle = title
                 currentEpisodesJson = episodesJson
@@ -678,7 +686,10 @@ class MainActivity : AppCompatActivity() {
         @JavascriptInterface fun playLocalNative(path: String, episodesJson: String,
                                                    xPx: Int, yPx: Int, wPx: Int, hPx: Int) {
             runOnUiThread {
-                // Position and configure SakuraPlayerView
+                currentIsLocal = true
+                currentFilePath = path
+                currentTitle = java.io.File(path).nameWithoutExtension
+                currentEpisodesJson = episodesJson
                 val params = sakuraPlayer.layoutParams as FrameLayout.LayoutParams
                 params.leftMargin = xPx; params.topMargin = yPx
                 params.width = wPx; params.height = hPx

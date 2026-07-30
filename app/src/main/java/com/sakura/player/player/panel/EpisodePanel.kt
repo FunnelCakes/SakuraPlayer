@@ -19,8 +19,10 @@ class EpisodePanel(context: Context) : FrameLayout(context) {
 
     init {
         setBackgroundColor(Color.argb(100, 0, 0, 0))
-        setOnClickListener { hide() }
+        setOnClickListener { if (isShowing) hide() }
         visibility = View.GONE
+        isClickable = false
+        isFocusable = false
 
         contentView = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
@@ -64,6 +66,7 @@ class EpisodePanel(context: Context) : FrameLayout(context) {
             }
             episodeList.addView(row)
         }
+        isClickable = true; isFocusable = true
         visibility = View.VISIBLE
         // Ensure layout is measured before animating
         post {
@@ -75,12 +78,20 @@ class EpisodePanel(context: Context) : FrameLayout(context) {
     }
 
     fun hide() {
-        animate().translationY(contentView.height.toFloat()).setDuration(200)
+        isClickable = false; isFocusable = false
+        val targetY = contentView.height.toFloat()
+        animate().translationY(targetY).setDuration(200)
             .withEndAction { visibility = View.GONE }.start()
+        postDelayed({ visibility = View.GONE }, 300) // safety: always hide after animation
         isShowing = false
     }
 
     fun toggle(episodes: List<EpisodeItem>, currentIndex: Int) {
         if (isShowing) hide() else show(episodes, currentIndex)
+    }
+
+    /** Block all touch when invisible. */
+    override fun onTouchEvent(event: android.view.MotionEvent): Boolean {
+        return isShowing && super.onTouchEvent(event)
     }
 }

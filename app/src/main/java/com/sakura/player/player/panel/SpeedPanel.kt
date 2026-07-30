@@ -20,8 +20,10 @@ class SpeedPanel(context: Context) : FrameLayout(context) {
 
     init {
         setBackgroundColor(Color.argb(100, 0, 0, 0))
-        setOnClickListener { hide() }
+        setOnClickListener { if (isShowing) hide() }
         visibility = View.GONE
+        isClickable = false
+        isFocusable = false
 
         contentView = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
@@ -64,6 +66,7 @@ class SpeedPanel(context: Context) : FrameLayout(context) {
             val row = contentView.getChildAt(i + 1) as? TextView ?: continue
             row.setTextColor(if (speeds[i] == currentSpeed) Color.parseColor("#FB7299") else Color.WHITE)
         }
+        isClickable = true; isFocusable = true
         visibility = View.VISIBLE
         // Ensure layout is measured before animating
         post {
@@ -75,8 +78,11 @@ class SpeedPanel(context: Context) : FrameLayout(context) {
     }
 
     fun hide() {
-        animate().translationY(contentView.height.toFloat()).setDuration(200)
+        isClickable = false; isFocusable = false
+        val targetY = contentView.height.toFloat()
+        animate().translationY(targetY).setDuration(200)
             .withEndAction { visibility = View.GONE }.start()
+        postDelayed({ visibility = View.GONE }, 300)
         isShowing = false
     }
 
