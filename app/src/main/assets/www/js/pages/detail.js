@@ -138,9 +138,9 @@ function playEpisode(epIndex) {
     $('#player-loading').style.display = '';
 
     if (window.currentDetail.isLocal) {
-        // Local playback: show WebView controls (JS-side UI drives the old ExoPlayer)
-        v.style.display = 'block';
-        $('#player-ctrls').style.display = '';
+        // Local playback: use SakuraPlayerView (same B站 UI as online)
+        v.style.display = 'none';
+        $('#player-ctrls').style.display = 'none';
 
         const ep = window.currentDetail.episodes?.find(e => e.index === epIndex);
         if (ep && ep.path) {
@@ -187,9 +187,24 @@ function buildEpisodesJson() {
     }));
 }
 
-// ==================== ExoPlayer Local File Playback ====================
+// ==================== SakuraPlayer Unified Playback (local + online) ====================
 
 function startLocalPlayer(filePath) {
+    // Use SakuraPlayerView for local files too — same B站 gestures and controls
+    var playerArea = $('#player-area');
+    var rect = playerArea.getBoundingClientRect();
+    var dpr = window.devicePixelRatio || 1;
+    var xPx = Math.round(rect.left * dpr);
+    var yPx = Math.round(rect.top * dpr);
+    var wPx = Math.round(rect.width * dpr);
+    var hPx = Math.round(rect.height * dpr);
+
+    var episodesJson = buildEpisodesJson();
+    window.Sakura.playLocalNative(filePath, episodesJson, xPx, yPx, wPx, hPx);
+}
+
+// Old ExoPlayer direct bridge (kept for backward compat, not used for new player)
+function startLocalPlayerLegacy(filePath) {
     // Get #player-area position in physical pixels
     const playerArea = $('#player-area');
     const rect = playerArea.getBoundingClientRect();

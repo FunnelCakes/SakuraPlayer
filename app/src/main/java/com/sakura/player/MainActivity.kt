@@ -675,6 +675,33 @@ class MainActivity : AppCompatActivity() {
         @JavascriptInterface fun getDiscover(page: Int, callbackId: String) {
             runOnUiThread { bridge.getDiscover(page, callbackId) }
         }
+        @JavascriptInterface fun playLocalNative(path: String, episodesJson: String,
+                                                   xPx: Int, yPx: Int, wPx: Int, hPx: Int) {
+            runOnUiThread {
+                // Position and configure SakuraPlayerView
+                val params = sakuraPlayer.layoutParams as FrameLayout.LayoutParams
+                params.leftMargin = xPx; params.topMargin = yPx
+                params.width = wPx; params.height = hPx
+                sakuraPlayer.layoutParams = params
+
+                val episodes = parseEpisodesFromJson(episodesJson)
+                val title = java.io.File(path).nameWithoutExtension
+                val config = PlayerConfig(mode = PlayerMode.INLINE, title = title, episodes = episodes)
+                sakuraPlayer.setup(config)
+                sakuraPlayer.visibility = View.VISIBLE
+
+                // Get FileProvider URI and play
+                val file = java.io.File(path)
+                if (file.exists()) {
+                    val uri = androidx.core.content.FileProvider.getUriForFile(
+                        this@MainActivity, "${packageName}.fileprovider", file
+                    )
+                    sakuraPlayer.playLocal(uri)
+                } else {
+                    sakuraPlayer.showError("文件不存在"); sakuraPlayer.visibility = View.GONE
+                }
+            }
+        }
         @JavascriptInterface fun setSakuraPlayerVisible(visible: Boolean) {
             runOnUiThread {
                 sakuraPlayer.visibility = if (visible) View.VISIBLE else View.GONE
