@@ -20,6 +20,7 @@ import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.documentfile.provider.DocumentFile
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
@@ -33,10 +34,10 @@ import com.sakura.player.data.SettingsPrefs
 import com.sakura.player.download.DownloadManager
 import com.sakura.player.follow.FollowManager
 import com.sakura.player.follow.UpdateChecker
-import com.sakura.player.player.*
+import com.sakura.player.player.PlayerActivity
+import com.shuyu.gsyvideoplayer.GSYVideoManager
+import com.shuyu.gsyvideoplayer.video.StandardGSYVideoPlayer
 import kotlinx.coroutines.*
-import org.json.JSONArray
-import org.json.JSONObject
 import java.io.File
 
 class MainActivity : AppCompatActivity() {
@@ -45,15 +46,17 @@ class MainActivity : AppCompatActivity() {
     private lateinit var bridge: JsBridge
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
-    // SakuraPlayer — 6-layer native player for inline + fullscreen playback
-    private lateinit var sakuraPlayer: SakuraPlayerView
-    private lateinit var playerBridge: PlayerBridge
-    private var currentM3u8Url: String = ""
-    private var currentTitle: String = ""
-    private var currentVideoId: Long = 0
-    private var currentEpisodesJson: String = "[]"
+    // ExoPlayer for local file playback (old bridge, kept for compatibility)
+    private lateinit var localPlayerView: PlayerView
+    private var exoPlayer: ExoPlayer? = null
+    @Volatile private var cachedPlayerState: String = "{}"
+
+    // GSYVideoPlayer for inline (half-screen) playback
+    private lateinit var gsyPlayer: StandardGSYVideoPlayer
     private var currentIsLocal: Boolean = false
     private var currentFilePath: String = ""
+    private var currentM3u8Url: String = ""
+    private var currentTitle: String = ""
 
     // SAF directory picker for custom download path
     private val safPickerLauncher = registerForActivityResult(
@@ -141,6 +144,7 @@ class MainActivity : AppCompatActivity() {
             bridge = JsBridge(this@MainActivity)
             bridge.setEvaluator { js -> evalJs(js) }
             addJavascriptInterface(WebAppInterface(), "Sakura")
+            addJavascriptInterface(LocalPlayerBridge(), "LocalPlayer")
 
             loadUrl("file:///android_asset/www/index.html")
 
@@ -200,50 +204,29 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // Create SakuraPlayerView (6-layer B站-style player) — hidden until playback starts
-        sakuraPlayer = SakuraPlayerView(this).apply {
+        // Create PlayerView for local file ExoPlayer playback
+        localPlayerView = PlayerView(this).apply {
+            id = View.generateViewId()
             visibility = View.GONE
-            onFullscreenRequest = {
-                // Pause half-screen player to avoid dual audio
-                sakuraPlayer.pause()
-                val pos = sakuraPlayer.getPlayerState().position
-                val episodesJson = buildEpisodesJson()
-                val intent = Intent(this@MainActivity, PlayerActivity::class.java).apply {
-                    if (currentIsLocal) {
-                        putExtra(PlayerActivity.EXTRA_SOURCE, "local")
-                        putExtra(PlayerActivity.EXTRA_PATH, currentFilePath)
-                    } else {
-                        putExtra(PlayerActivity.EXTRA_SOURCE, "online")
-                        putExtra(PlayerActivity.EXTRA_URL, currentM3u8Url)
-                    }
-                    putExtra(PlayerActivity.EXTRA_TITLE, currentTitle)
-                    putExtra(PlayerActivity.EXTRA_POSITION, pos)
-                    putExtra(PlayerActivity.EXTRA_EPISODES, episodesJson)
-                }
-                startActivity(intent)
-            }
-            onEpisodeChange = { idx ->
-                evalJs("if(window.onPlayerEpisodeChange)window.onPlayerEpisodeChange($idx)")
-            }
-            onStateChanged = { state ->
-                // Pass state as JS object directly (no JSON.parse needed in JS)
-                val js = """{playing:${state.playing},position:${state.position},duration:${state.duration},currentEp:${state.currentEp},speed:${state.speed}}"""
-                evalJs("if(window.onPlayerStateChanged)window.onPlayerStateChanged($js)")
-            }
+            useController = false
+            controllerAutoShow = false
+            resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+            setBackgroundColor(0xFF000000.toInt())
+        }
+        // Create GSYVideoPlayer for inline playback (half-screen)
+        gsyPlayer = StandardGSYVideoPlayer(this).apply {
+            id = View.generateViewId()
+            visibility = View.GONE
+            setIsTouchWiget(true)
+            // Hide title/back button for inline mode
+            backButton.visibility = View.GONE
+            titleTextView.visibility = View.GONE
         }
 
-        // Add views: WebView (bottom), SakuraPlayer (top)
+        // Add views to root: WebView first (bottom), PlayerView on top, GSY on topmost
         rootLayout.addView(webView)
-        rootLayout.addView(sakuraPlayer)
-
-        playerBridge = PlayerBridge(
-            player = sakuraPlayer,
-            context = this@MainActivity,
-            jsEvaluator = { js -> evalJs(js) },
-            m3u8Resolver = { videoId, title, epIndex, callback ->
-                bridge.playOnline(videoId, title, epIndex, callback)
-            }
-        )
+        rootLayout.addView(localPlayerView)
+        rootLayout.addView(gsyPlayer)
 
         setContentView(rootLayout)
         Log.e("SakuraMain", "App started, WebView created, loading frontend")
@@ -310,8 +293,225 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ==================== JS Bridge Interface ====================
+    // ==================== LocalPlayer ExoPlayer Bridge ====================
 
+    inner class LocalPlayerBridge {
+        /**
+         * Start playing a local file with ExoPlayer.
+         * @param path Absolute file path (e.g., /storage/emulated/0/SakuraAnime/video.mp4)
+         * @param xPx Player area left in physical pixels (= CSS px * devicePixelRatio)
+         * @param yPx Player area top in physical pixels
+         * @param wPx Player area width in physical pixels
+         * @param hPx Player area height in physical pixels (minus control bar space)
+         */
+        @JavascriptInterface
+        fun play(path: String, xPx: Int, yPx: Int, wPx: Int, hPx: Int) {
+            runOnUiThread {
+                Log.d(TAG, "LocalPlayer.play: path=$path, rect=($xPx,$yPx,${wPx}x$hPx)")
+                try {
+                    val file = File(path)
+                    if (!file.exists()) {
+                        evalJs("if(window.showToast)window.showToast('文件不存在: $path')")
+                        return@runOnUiThread
+                    }
+
+                    // Position and size PlayerView
+                    val params = localPlayerView.layoutParams as FrameLayout.LayoutParams
+                    params.leftMargin = xPx
+                    params.topMargin = yPx
+                    params.width = wPx
+                    params.height = hPx
+                    localPlayerView.layoutParams = params
+
+                    // Create or reuse ExoPlayer
+                    if (exoPlayer == null) {
+                        exoPlayer = ExoPlayer.Builder(this@MainActivity)
+                            .build()
+                            .apply {
+                                addListener(ExoPlayerListener())
+                            }
+                        localPlayerView.player = exoPlayer
+                    }
+
+                    val player = exoPlayer!!
+                    player.stop()
+                    player.setMediaItem(MediaItem.fromUri(Uri.fromFile(file)))
+                    player.prepare()
+                    player.playWhenReady = true
+
+                    // Show PlayerView, hide WebView video elements
+                    localPlayerView.visibility = View.VISIBLE
+                    evalJs("""
+                        (function(){
+                            var dv = document.getElementById('detail-video');
+                            if (dv) { dv.style.display = 'none'; dv.pause(); dv.src = ''; }
+                            var pc = document.getElementById('player-cover');
+                            if (pc) pc.style.display = 'none';
+                            var pl = document.getElementById('player-loading');
+                            if (pl) pl.style.display = 'none';
+                            if (typeof bindLocalPlayerControls === 'function') bindLocalPlayerControls();
+                        })();
+                    """.trimIndent())
+                } catch (e: Exception) {
+                    Log.e(TAG, "LocalPlayer.play failed", e)
+                    evalJs("if(window.showToast)window.showToast('播放失败: ${e.message?.replace("'", "\\'")}')")
+                }
+            }
+        }
+
+        @JavascriptInterface
+        fun pause() {
+            runOnUiThread { exoPlayer?.pause() }
+        }
+
+        @JavascriptInterface
+        fun resume() {
+            runOnUiThread { exoPlayer?.play() }
+        }
+
+        @JavascriptInterface
+        fun toggle() {
+            runOnUiThread {
+                exoPlayer?.let {
+                    if (it.playWhenReady) it.pause() else it.play()
+                }
+            }
+        }
+
+        @JavascriptInterface
+        fun seek(positionMs: Long) {
+            runOnUiThread {
+                exoPlayer?.seekTo(positionMs.coerceIn(0, exoPlayer?.duration ?: 0))
+            }
+        }
+
+        @JavascriptInterface
+        fun seekRelative(deltaMs: Long) {
+            runOnUiThread {
+                exoPlayer?.let {
+                    val newPos = (it.currentPosition + deltaMs).coerceIn(0, it.duration)
+                    it.seekTo(newPos)
+                }
+            }
+        }
+
+        @JavascriptInterface
+        fun getState(): String {
+            return cachedPlayerState
+        }
+
+        @JavascriptInterface
+        fun release() {
+            runOnUiThread {
+                Log.d(TAG, "LocalPlayer.release")
+                progressUpdater.removeCallbacks(progressUpdateRunnable)
+                exoPlayer?.stop()
+                exoPlayer?.release()
+                exoPlayer = null
+                localPlayerView.player = null
+                localPlayerView.visibility = View.GONE
+                cachedPlayerState = "{}"
+                evalJs("if(window.onLocalPlayerReleased)window.onLocalPlayerReleased()")
+            }
+        }
+    }
+
+    private val progressUpdater = Handler(Looper.getMainLooper())
+    private val progressUpdateRunnable = object : Runnable {
+        override fun run() {
+            updateCachedPlayerState()
+            if (exoPlayer?.playWhenReady == true) {
+                progressUpdater.postDelayed(this, 250)
+            }
+        }
+    }
+
+    private inner class ExoPlayerListener : Player.Listener {
+        override fun onPlaybackStateChanged(state: Int) {
+            updateCachedPlayerState()
+            when (state) {
+                Player.STATE_READY -> {
+                    progressUpdater.removeCallbacks(progressUpdateRunnable)
+                    if (exoPlayer?.playWhenReady == true) {
+                        progressUpdater.post(progressUpdateRunnable)
+                    }
+                    evalJs("""
+                        (function(){
+                            var pl = document.getElementById('player-loading');
+                            if (pl) pl.style.display = 'none';
+                        })();
+                    """.trimIndent())
+                }
+                Player.STATE_ENDED -> {
+                    progressUpdater.removeCallbacks(progressUpdateRunnable)
+                    updateCachedPlayerState()
+                    evalJs("""
+                        (function(){
+                            var pp = document.getElementById('p-pp');
+                            if (pp) pp.textContent = '\u{1F504}';
+                            if (window.playerState) window.playerState.playing = false;
+                        })();
+                    """.trimIndent())
+                }
+                Player.STATE_BUFFERING -> {
+                    evalJs("""
+                        (function(){
+                            var pl = document.getElementById('player-loading');
+                            if (pl) pl.style.display = '';
+                        })();
+                    """.trimIndent())
+                }
+            }
+        }
+
+        override fun onIsPlayingChanged(isPlaying: Boolean) {
+            updateCachedPlayerState()
+            if (isPlaying) {
+                progressUpdater.removeCallbacks(progressUpdateRunnable)
+                progressUpdater.post(progressUpdateRunnable)
+            } else {
+                progressUpdater.removeCallbacks(progressUpdateRunnable)
+            }
+            val icon = if (isPlaying) "\u23F8" else "\u25B6"
+            evalJs("""
+                (function(){
+                    var pp = document.getElementById('p-pp');
+                    if (pp) pp.textContent = '$icon';
+                    if (window.playerState) window.playerState.playing = $isPlaying;
+                })();
+            """.trimIndent())
+        }
+
+        override fun onPlayerError(error: PlaybackException) {
+            Log.e(TAG, "ExoPlayer error", error)
+            progressUpdater.removeCallbacks(progressUpdateRunnable)
+            evalJs("""
+                (function(){
+                    var pl = document.getElementById('player-loading');
+                    if (pl) pl.style.display = 'none';
+                    if (window.showToast) window.showToast('播放错误: ${error.message?.replace("'", "\\'")?.take(50)}');
+                })();
+            """.trimIndent())
+        }
+    }
+
+    private fun updateCachedPlayerState() {
+        val p = exoPlayer
+        if (p == null) {
+            cachedPlayerState = "{}"
+            return
+        }
+        cachedPlayerState = buildString {
+            append("{")
+            append("\"position\":${p.currentPosition},")
+            append("\"duration\":${p.duration},")
+            append("\"playing\":${p.playWhenReady},")
+            append("\"playbackState\":${p.playbackState}")
+            append("}")
+        }
+    }
+
+    // ==================== JS Bridge Interface ====================
 
     inner class WebAppInterface {
         @JavascriptInterface fun search(keyword: String, callbackId: String) {
@@ -322,42 +522,6 @@ class MainActivity : AppCompatActivity() {
         }
         @JavascriptInterface fun playOnline(videoId: Long, title: String, epIndex: Int, callbackId: String) {
             runOnUiThread { bridge.playOnline(videoId, title, epIndex, callbackId) }
-        }
-        @JavascriptInterface fun playOnlineNative(videoId: Long, title: String, epIndex: Int,
-                                                   episodesJson: String, xPx: Int, yPx: Int, wPx: Int, hPx: Int) {
-            runOnUiThread {
-                currentIsLocal = false; currentFilePath = ""
-                currentVideoId = videoId
-                currentTitle = title
-                currentEpisodesJson = episodesJson
-
-                // Position SakuraPlayerView over the WebView's #player-area
-                val params = sakuraPlayer.layoutParams as FrameLayout.LayoutParams
-                params.leftMargin = xPx
-                params.topMargin = yPx
-                params.width = wPx
-                params.height = hPx
-                sakuraPlayer.layoutParams = params
-
-                val episodes = parseEpisodesFromJson(episodesJson)
-                val config = PlayerConfig(mode = PlayerMode.INLINE, title = title, episodes = episodes)
-                sakuraPlayer.setup(config)
-                sakuraPlayer.visibility = View.VISIBLE
-
-                // Resolve m3u8 URL (with CDN race) and play in SakuraPlayer
-                scope.launch(Dispatchers.IO) {
-                    val m3u8Url = bridge.resolveM3u8Url(videoId, epIndex)
-                    withContext(Dispatchers.Main) {
-                        if (m3u8Url != null) {
-                            currentM3u8Url = m3u8Url
-                            sakuraPlayer.play(m3u8Url)
-                        } else {
-                            evalJs("if(window.showToast)window.showToast('无法获取播放地址')")
-                            sakuraPlayer.visibility = View.GONE
-                        }
-                    }
-                }
-            }
         }
         @JavascriptInterface fun openFullscreen(videoId: Long, title: String, epIndex: Int, callbackId: String) {
             runOnUiThread { bridge.openFullscreen(videoId, title, epIndex, callbackId) }
@@ -389,6 +553,49 @@ class MainActivity : AppCompatActivity() {
         @JavascriptInterface fun createLocalDir(parentPath: String, name: String, callbackId: String) {
             runOnUiThread { bridge.createLocalDir(parentPath, name, callbackId) }
         }
+        // ===== GSY Inline Player =====
+        @JavascriptInterface fun playOnlineInline(videoId: Long, title: String, epIndex: Int,
+                                                   episodesJson: String, xPx: Int, yPx: Int, wPx: Int, hPx: Int) {
+            runOnUiThread {
+                currentIsLocal = false
+                currentFilePath = ""
+                currentTitle = title
+                scope.launch {
+                    val m3u8 = bridge.resolveM3u8Url(videoId, epIndex)
+                    if (m3u8 == null) {
+                        evalJs("if(window.showToast)window.showToast('无法获取播放地址')")
+                        return@launch
+                    }
+                    currentM3u8Url = m3u8
+                    positionAndSetupGsyPlayer(xPx, yPx, wPx, hPx, m3u8, true, title)
+                }
+            }
+        }
+
+        @JavascriptInterface fun playLocalInline(path: String, episodesJson: String,
+                                                  xPx: Int, yPx: Int, wPx: Int, hPx: Int) {
+            runOnUiThread {
+                currentIsLocal = true
+                currentFilePath = path
+                currentM3u8Url = ""
+                currentTitle = File(path).nameWithoutExtension
+                val file = File(path)
+                if (!file.exists()) {
+                    evalJs("if(window.showToast)window.showToast('文件不存在: $path')")
+                    return@runOnUiThread
+                }
+                val uri = FileProvider.getUriForFile(this@MainActivity, "$packageName.fileprovider", file)
+                positionAndSetupGsyPlayer(xPx, yPx, wPx, hPx, uri.toString(), false, currentTitle)
+            }
+        }
+
+        @JavascriptInterface fun hideInlinePlayer() {
+            runOnUiThread {
+                gsyPlayer.onVideoPause()
+                gsyPlayer.visibility = View.GONE
+            }
+        }
+
         // Legacy
         @JavascriptInterface fun browseDir(path: String, callbackId: String) {
             runOnUiThread { bridge.browseLocalDir(path, callbackId) }
@@ -445,41 +652,40 @@ class MainActivity : AppCompatActivity() {
         @JavascriptInterface fun getDiscover(page: Int, callbackId: String) {
             runOnUiThread { bridge.getDiscover(page, callbackId) }
         }
-        @JavascriptInterface fun playLocalNative(path: String, episodesJson: String,
-                                                   xPx: Int, yPx: Int, wPx: Int, hPx: Int) {
-            runOnUiThread {
-                currentIsLocal = true
-                currentFilePath = path
-                currentTitle = java.io.File(path).nameWithoutExtension
-                currentEpisodesJson = episodesJson
-                val params = sakuraPlayer.layoutParams as FrameLayout.LayoutParams
-                params.leftMargin = xPx; params.topMargin = yPx
-                params.width = wPx; params.height = hPx
-                sakuraPlayer.layoutParams = params
+    }
 
-                val episodes = parseEpisodesFromJson(episodesJson)
-                val title = java.io.File(path).nameWithoutExtension
-                val config = PlayerConfig(mode = PlayerMode.INLINE, title = title, episodes = episodes)
-                sakuraPlayer.setup(config)
-                sakuraPlayer.visibility = View.VISIBLE
+    // ==================== GSY Player Helpers ====================
 
-                // Get FileProvider URI and play
-                val file = java.io.File(path)
-                if (file.exists()) {
-                    val uri = androidx.core.content.FileProvider.getUriForFile(
-                        this@MainActivity, "${packageName}.fileprovider", file
-                    )
-                    sakuraPlayer.playLocal(uri)
-                } else {
-                    sakuraPlayer.showError("文件不存在"); sakuraPlayer.visibility = View.GONE
-                }
+    private fun positionAndSetupGsyPlayer(xPx: Int, yPx: Int, wPx: Int, hPx: Int,
+                                           url: String, isLive: Boolean, title: String) {
+        val params = gsyPlayer.layoutParams as FrameLayout.LayoutParams
+        params.leftMargin = xPx
+        params.topMargin = yPx
+        params.width = wPx
+        params.height = hPx
+        gsyPlayer.layoutParams = params
+        gsyPlayer.visibility = View.VISIBLE
+
+        gsyPlayer.setUp(url, isLive, title)
+        gsyPlayer.startPlayLogic()
+
+        // Wire fullscreen button
+        gsyPlayer.postDelayed({ wireFullscreenButton() }, 300)
+    }
+
+    private fun wireFullscreenButton() {
+        val btn = gsyPlayer.fullscreenButton ?: return
+        btn.setOnClickListener {
+            val intent = Intent(this@MainActivity, PlayerActivity::class.java).apply {
+                putExtra("source", if (currentIsLocal) "local" else "online")
+                if (currentIsLocal) putExtra("path", currentFilePath)
+                else putExtra("url", currentM3u8Url)
+                putExtra("title", currentTitle)
+                putExtra("position", gsyPlayer.currentPositionWhenPlaying)
+                putExtra("playing", gsyPlayer.isInPlayingState)
             }
-        }
-        @JavascriptInterface fun setSakuraPlayerVisible(visible: Boolean) {
-            runOnUiThread {
-                sakuraPlayer.visibility = if (visible) View.VISIBLE else View.GONE
-                if (!visible) sakuraPlayer.release()
-            }
+            gsyPlayer.onVideoPause()
+            startActivity(intent)
         }
     }
 
@@ -492,43 +698,39 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** Parse episode JSON array into EpisodeItem list. */
-    private fun parseEpisodesFromJson(json: String): List<EpisodeItem> {
-        val list = mutableListOf<EpisodeItem>()
-        try {
-            val arr = JSONArray(json)
-            for (i in 0 until arr.length()) {
-                val obj = arr.getJSONObject(i)
-                list.add(
-                    EpisodeItem(
-                        index = obj.getInt("index"),
-                        name = obj.getString("name"),
-                        path = obj.optString("path", ""),
-                        videoId = obj.optLong("videoId", 0),
-                        isLocal = obj.optBoolean("isLocal", false)
-                    )
-                )
-            }
-        } catch (_: Exception) {}
-        return list
-    }
-
-    /** Build episodes JSON from cached field for fullscreen handoff. */
-    private fun buildEpisodesJson(): String {
-        return currentEpisodesJson
-    }
-
     override fun onResume() {
         super.onResume()
 
-        // Resume half-screen SakuraPlayer, syncing position from fullscreen
-        val resumePos = JsBridge.lastFullscreenPosition
-        JsBridge.lastFullscreenPosition = 0
-        if (::sakuraPlayer.isInitialized) {
-            if (resumePos > 0) {
-                sakuraPlayer.exoPlayer?.seekTo(resumePos.coerceIn(0, sakuraPlayer.exoPlayer?.duration ?: 0))
+        // Restore GSY inline player state when returning from fullscreen
+        if (::gsyPlayer.isInitialized) {
+            val pos = JsBridge.lastFullscreenPosition
+            if (pos > 0 && gsyPlayer.visibility == View.VISIBLE) {
+                // Returning from fullscreen: restore position and play state
+                gsyPlayer.onVideoResume()
+                gsyPlayer.seekOnStart = pos
+                gsyPlayer.startPlayLogic()
+                if (!JsBridge.lastFullscreenWasPlaying) {
+                    gsyPlayer.postDelayed({ gsyPlayer.onVideoPause() }, 100)
+                }
+                // Re-wire the fullscreen button after restart
+                gsyPlayer.postDelayed({ wireFullscreenButton() }, 500)
+            } else {
+                // Resume from background: just restore surface but stay paused
+                gsyPlayer.onVideoResume()
+                gsyPlayer.onVideoPause()
             }
-            sakuraPlayer.resume()
+            JsBridge.lastFullscreenPosition = 0
+            JsBridge.lastFullscreenWasPlaying = false
+        }
+
+        // Legacy ExoPlayer resume from fullscreen (keep existing behavior)
+        if (JsBridge.lastFullscreenPosition > 0 && exoPlayer != null) {
+            val resumePos = JsBridge.lastFullscreenPosition
+            JsBridge.lastFullscreenPosition = 0
+            exoPlayer?.let {
+                it.seekTo(resumePos.coerceIn(0, it.duration))
+                it.play()
+            }
         }
 
         val dlDir = File(SettingsPrefs.downloadPath)
@@ -543,7 +745,15 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         scope.cancel()
-        if (::sakuraPlayer.isInitialized) sakuraPlayer.release()
+        // Release GSY
+        if (::gsyPlayer.isInitialized) {
+            gsyPlayer.onVideoPause()
+        }
+        GSYVideoManager.releaseAllVideos()
+        // Release ExoPlayer
+        exoPlayer?.stop()
+        exoPlayer?.release()
+        exoPlayer = null
         super.onDestroy()
     }
 

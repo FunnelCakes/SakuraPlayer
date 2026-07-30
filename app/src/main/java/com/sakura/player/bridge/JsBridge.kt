@@ -35,6 +35,7 @@ import kotlin.coroutines.suspendCoroutine
 class JsBridge(private val ctx: Context) {
     companion object {
         var lastFullscreenPosition: Long = 0
+        var lastFullscreenWasPlaying: Boolean = false
     }
     private val TAG = "JsBridge"
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -235,30 +236,6 @@ class JsBridge(private val ctx: Context) {
         }
     }
 
-    /** Suspend version: resolve the best m3u8 URL for native playback. Returns null on failure. */
-    suspend fun resolveM3u8Url(videoId: Long, epIndex: Int): String? {
-        return withContext(Dispatchers.IO) {
-            try {
-                val detail = AnimeScraper.getDetail(domain, videoId)
-                val trySids = if (detail.sourceIds.isNotEmpty()) detail.sourceIds else listOf(1)
-                val entries = mutableListOf<Pair<Int, String>>()
-                for (sid in trySids) {
-                    try {
-                        val vu = VideoExtractor.extractFromPlayPage(domain, videoId, epIndex, sid)
-                        if (vu.m3u8Url.isNotEmpty()) {
-                            entries.add(sid to vu.m3u8Url)
-                        }
-                    } catch (_: Exception) {}
-                }
-                if (entries.isEmpty()) return@withContext null
-                if (entries.size == 1) entries[0].second
-                else raceStreamingCdns(entries)
-            } catch (_: Exception) {
-                null
-            }
-        }
-    }
-
     /** Race multiple CDNs: probe each for 1.5s, return the fastest one's m3u8 URL */
     private suspend fun raceStreamingCdns(
         entries: List<Pair<Int, String>>, sampleMs: Long = 1500
@@ -281,6 +258,21 @@ class JsBridge(private val ctx: Context) {
         val bestSpeed = String.format("%.2f", speeds[best] ?: 0.0)
         Log.e(TAG, "Streaming race winner: sid=$best ($bestSpeed MB/s)")
         return entries.find { it.first == best }!!.second
+    }
+
+    /** Resolve m3u8 URL for inline player (suspend, called from MainActivity) */
+    suspend fun resolveM3u8Url(videoId: Long, epIndex: Int): String? {
+        return withContext(Dispatchers.IO) {
+            try {
+                val detail = AnimeScraper.getDetail(domain, videoId)
+                val trySids = if (detail.sourceIds.isNotEmpty()) detail.sourceIds else listOf(1)
+                for (sid in trySids) {
+                    val vu = VideoExtractor.extractFromPlayPage(domain, videoId, epIndex, sid)
+                    if (vu.m3u8Url.isNotEmpty()) return@withContext vu.m3u8Url
+                }
+                null
+            } catch (_: Exception) { null }
+        }
     }
 
     fun openFullscreen(videoId: Long, title: String, epIndex: Int, callback: String) {

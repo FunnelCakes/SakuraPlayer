@@ -1,151 +1,157 @@
 package com.sakura.player.player
 
 import android.content.pm.ActivityInfo
-import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.util.Log
 import android.view.View
+import android.view.ViewGroup
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.WindowManager
+import android.widget.FrameLayout
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.FileProvider
 import com.sakura.player.bridge.JsBridge
-import org.json.JSONArray
+import com.shuyu.gsyvideoplayer.GSYVideoManager
+import com.shuyu.gsyvideoplayer.utils.OrientationUtils
+import com.shuyu.gsyvideoplayer.video.StandardGSYVideoPlayer
 import java.io.File
 
-/**
- * Fullscreen player activity using SakuraPlayerView (ExoPlayer + B站-style gesture UI).
- *
- * Supports three playback sources:
- *   - "online": direct m3u8 URL
- *   - "local":  file path, converted to FileProvider content:// URI
- *   - "url":    already-resolved content:// URI
- */
 class PlayerActivity : AppCompatActivity() {
 
-    private lateinit var player: SakuraPlayerView
+    private val TAG = "PlayerActivity"
+    private lateinit var gsyPlayer: StandardGSYVideoPlayer
+    private var orientationUtils: OrientationUtils? = null
 
     companion object {
         const val EXTRA_SOURCE = "source"
         const val EXTRA_URL = "url"
         const val EXTRA_PATH = "path"
         const val EXTRA_TITLE = "title"
-        const val EXTRA_POSITION = "position"
-        const val EXTRA_EPISODES = "episodes"
+        const val EXTRA_DIR = "dir"
         const val EXTRA_VIDEO_ID = "videoId"
+        const val EXTRA_POSITION = "position"
+        const val EXTRA_PLAYING = "playing"
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Force landscape, keep screen on
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
-        player = SakuraPlayerView(this)
-        setContentView(player)
-        hideSystemUI()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            window.attributes.layoutInDisplayCutoutMode =
+                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+        }
 
         val source = intent.getStringExtra(EXTRA_SOURCE) ?: "online"
         val title = intent.getStringExtra(EXTRA_TITLE) ?: ""
         val position = intent.getLongExtra(EXTRA_POSITION, 0)
-        val episodesJson = intent.getStringExtra(EXTRA_EPISODES) ?: "[]"
+        val playing = intent.getBooleanExtra(EXTRA_PLAYING, true)
 
-        val config = PlayerConfig(
-            mode = PlayerMode.FULLSCREEN,
-            title = title,
-            episodes = parseEpisodes(episodesJson)
-        )
-        player.setup(config)
+        // Create GSY player
+        gsyPlayer = StandardGSYVideoPlayer(this).apply {
+            layoutParams = ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+            setBackgroundColor(0xFF000000.toInt())
+            setIsTouchWiget(true)
+            // Hide back button (we use system back)
+            backButton.visibility = View.GONE
+        }
 
-        // Resolve and play
-        when (source) {
+        setContentView(gsyPlayer)
+
+        // Set up video source
+        val url: String = when (source) {
             "local" -> {
                 val path = intent.getStringExtra(EXTRA_PATH) ?: ""
                 val file = File(path)
                 if (file.exists()) {
-                    val uri = FileProvider.getUriForFile(
-                        this,
-                        "${packageName}.fileprovider",
-                        file
-                    )
-                    player.playLocal(uri)
-                } else {
-                    finish()
-                }
+                    FileProvider.getUriForFile(this, "$packageName.fileprovider", file).toString()
+                } else ""
             }
-            "url" -> {
-                val url = intent.getStringExtra(EXTRA_URL) ?: ""
-                player.playLocal(Uri.parse(url))
-            }
-            "online" -> {
-                val url = intent.getStringExtra(EXTRA_URL) ?: ""
-                if (url.isNotEmpty()) {
-                    player.play(url)
-                }
-            }
+            "url" -> intent.getStringExtra(EXTRA_URL) ?: ""
+            "online" -> intent.getStringExtra(EXTRA_URL) ?: ""
+            else -> ""
         }
 
-        // Restore position if provided
+        if (url.isEmpty()) {
+            finish()
+            return
+        }
+
+        val isLive = url.contains(".m3u8")
+        gsyPlayer.setUp(url, isLive, title)
+
         if (position > 0) {
-            player.exoPlayer?.seekTo(position)
+            gsyPlayer.seekOnStart = position
         }
 
-        // Exit fullscreen on back
-        player.onFullscreenRequest = { finish() }
+        gsyPlayer.startPlayLogic()
+
+        if (!playing) {
+            gsyPlayer.postDelayed({ gsyPlayer.onVideoPause() }, 100)
+        }
+
+        hideSystemUI()
+
+        // Set back button listener
+        gsyPlayer.backButton.visibility = View.VISIBLE
+        gsyPlayer.backButton.setOnClickListener { finish() }
     }
 
-    private fun parseEpisodes(json: String): List<EpisodeItem> {
-        val list = mutableListOf<EpisodeItem>()
-        try {
-            val arr = JSONArray(json)
-            for (i in 0 until arr.length()) {
-                val obj = arr.getJSONObject(i)
-                list.add(
-                    EpisodeItem(
-                        index = obj.getInt("index"),
-                        name = obj.getString("name"),
-                        path = obj.optString("path", ""),
-                        videoId = obj.optLong("videoId", 0),
-                        isLocal = obj.optBoolean("isLocal", false)
-                    )
-                )
-            }
-        } catch (_: Exception) {}
-        return list
+    override fun onPause() {
+        super.onPause()
+        gsyPlayer.onVideoPause()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        gsyPlayer.onVideoResume()
+        // Stay paused on return from background
+        gsyPlayer.onVideoPause()
     }
 
     override fun onDestroy() {
-        // Save playback position for resume in MainActivity
-        val finalPos = player.exoPlayer?.currentPosition ?: 0
-        if (finalPos > 0) {
-            JsBridge.lastFullscreenPosition = finalPos
-        }
-        player.release()
         super.onDestroy()
+        // Save state for MainActivity to resume inline player
+        JsBridge.lastFullscreenPosition = gsyPlayer.currentPositionWhenPlaying
+        JsBridge.lastFullscreenWasPlaying = gsyPlayer.isInPlayingState
+        GSYVideoManager.releaseAllVideos()
+        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
     }
 
-    /** Hide system bars in immersive sticky mode for true fullscreen. */
+    override fun onBackPressed() {
+        if (orientationUtils != null) {
+            orientationUtils?.backToProtVideo()
+            return
+        }
+        if (GSYVideoManager.backFromWindowFull(this)) {
+            return
+        }
+        super.onBackPressed()
+    }
+
     private fun hideSystemUI() {
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                window.insetsController?.let {
-                    it.hide(WindowInsets.Type.systemBars())
-                    it.systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-                }
-            } else {
-                @Suppress("DEPRECATION")
-                window.decorView.systemUiVisibility = (
-                    View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
-                    View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
-                    View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or
-                    View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
-                    View.SYSTEM_UI_FLAG_FULLSCREEN or
-                    View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                )
-            }
-        } catch (_: Exception) {}
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            window.insetsController?.hide(WindowInsets.Type.systemBars())
+            window.insetsController?.systemBarsBehavior =
+                WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        } else {
+            @Suppress("DEPRECATION")
+            window.decorView.systemUiVisibility = (
+                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
+                View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
+                View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or
+                View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
+                View.SYSTEM_UI_FLAG_FULLSCREEN or
+                View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+            )
+        }
     }
 }

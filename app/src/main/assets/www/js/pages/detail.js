@@ -91,8 +91,8 @@ function resetPlayer() {
     if (window.LocalPlayer) {
         try { window.LocalPlayer.release(); } catch(e) {}
     }
-    // Hide native SakuraPlayer
-    try { window.Sakura.setSakuraPlayerVisible(false); } catch(e) {}
+    // Hide GSY inline player
+    try { window.Sakura.hideInlinePlayer(); } catch(e) {}
     // Clear global document-level pointer handlers to avoid stale handler conflicts
     document.onpointermove = null;
     document.onpointerup = null;
@@ -124,7 +124,7 @@ function playEpisode(epIndex) {
     // Highlight active episode
     $$('#episode-grid .ep-btn').forEach(b => b.classList.toggle('playing', parseInt(b.dataset.ep) === epIndex));
 
-    // Reset previous local player
+    // Reset previous players (ExoPlayer + GSY)
     if (localPlayerPollTimer) {
         clearInterval(localPlayerPollTimer);
         localPlayerPollTimer = null;
@@ -132,65 +132,15 @@ function playEpisode(epIndex) {
     if (window.LocalPlayer) {
         try { window.LocalPlayer.release(); } catch(e) {}
     }
+    try { window.Sakura.hideInlinePlayer(); } catch(e) {}
 
     const v = $('#detail-video');
     $('#player-cover').style.display = 'none';
     $('#player-loading').style.display = '';
+    // Hide video element (GSY renders on top of WebView)
+    v.style.display = 'none';
 
-    if (window.currentDetail.isLocal) {
-        // Local playback: use SakuraPlayerView (same B站 UI as online)
-        v.style.display = 'none';
-        $('#player-ctrls').style.display = 'none';
-
-        const ep = window.currentDetail.episodes?.find(e => e.index === epIndex);
-        if (ep && ep.path) {
-            startLocalPlayer(ep.path);
-        } else {
-            showToast('找不到本地文件');
-            $('#player-loading').style.display = 'none';
-        }
-    } else {
-        // Online: hide WebView controls — native SakuraPlayer handles UI
-        v.style.display = 'none';
-        $('#player-ctrls').style.display = 'none';
-        // Online streaming: use native SakuraPlayer (ExoPlayer + B站 gesture controls)
-        var playerArea = $('#player-area');
-        var rect = playerArea.getBoundingClientRect();
-        var dpr = window.devicePixelRatio || 1;
-        var xPx = Math.round(rect.left * dpr);
-        var yPx = Math.round(rect.top * dpr);
-        var wPx = Math.round(rect.width * dpr);
-        var hPx = Math.round(rect.height * dpr);
-
-        var episodesJson = buildEpisodesJson();
-        window.Sakura.playOnlineNative(
-            window.currentDetail.videoId,
-            window.currentDetail.title,
-            epIndex,
-            episodesJson,
-            xPx, yPx, wPx, hPx
-        );
-        // Native player will handle loading UI via onStateChanged callback
-    }
-}
-
-function buildEpisodesJson() {
-    if (!window.currentDetail || !window.currentDetail.episodes) return '[]';
-    return JSON.stringify(window.currentDetail.episodes.map(function(ep) {
-        return {
-            index: ep.index,
-            name: ep.name,
-            path: ep.path || '',
-            videoId: window.currentDetail.videoId || 0,
-            isLocal: window.currentDetail.isLocal || false
-        };
-    }));
-}
-
-// ==================== SakuraPlayer Unified Playback (local + online) ====================
-
-function startLocalPlayer(filePath) {
-    // Use SakuraPlayerView for local files too — same B站 gestures and controls
+    // Calculate player area position in physical pixels
     var playerArea = $('#player-area');
     var rect = playerArea.getBoundingClientRect();
     var dpr = window.devicePixelRatio || 1;
@@ -199,12 +149,27 @@ function startLocalPlayer(filePath) {
     var wPx = Math.round(rect.width * dpr);
     var hPx = Math.round(rect.height * dpr);
 
-    var episodesJson = buildEpisodesJson();
-    window.Sakura.playLocalNative(filePath, episodesJson, xPx, yPx, wPx, hPx);
+    if (window.currentDetail.isLocal) {
+        const ep = window.currentDetail.episodes?.find(e => e.index === epIndex);
+        if (ep && ep.path) {
+            // Use GSY inline player for local files
+            window.Sakura.playLocalInline(ep.path, '[]', xPx, yPx, wPx, hPx);
+            $('#player-loading').style.display = 'none';
+        } else {
+            showToast('找不到本地文件');
+            $('#player-loading').style.display = 'none';
+        }
+    } else {
+        // Online streaming: use GSY inline player
+        window.Sakura.playOnlineInline(window.currentDetail.videoId, window.currentDetail.title, epIndex, '[]', xPx, yPx, wPx, hPx);
+        // Loading indicator hidden when GSY starts playing (handled by GSY itself)
+        setTimeout(function() { $('#player-loading').style.display = 'none'; }, 3000);
+    }
 }
 
-// Old ExoPlayer direct bridge (kept for backward compat, not used for new player)
-function startLocalPlayerLegacy(filePath) {
+// ==================== ExoPlayer Local File Playback ====================
+
+function startLocalPlayer(filePath) {
     // Get #player-area position in physical pixels
     const playerArea = $('#player-area');
     const rect = playerArea.getBoundingClientRect();
@@ -377,7 +342,158 @@ window.onLocalPlayerReleased = function() {
     }
 };
 
-// ==================== Retained player helpers ====================
+// ==================== Player Controls (WebView <video> for online) ====================
+
+function bindPlayer(v) {
+    const fm = s => s && isFinite(s) ? String(Math.floor(s/60)).padStart(2,'0')+':'+String(Math.floor(s%60)).padStart(2,'0') : '00:00';
+
+    v.onloadedmetadata = () => {
+        $('#p-ttot').textContent = fm(v.duration);
+        $('#player-loading').style.display = 'none';
+        v.play().catch(() => {});
+    };
+    v.ondurationchange = () => { $('#p-ttot').textContent = fm(v.duration); };
+    v.onplaying = () => { $('#p-pp').textContent = '\u23F8'; window.playerState.playing = true; };
+    v.onpause = () => { $('#p-pp').textContent = '\u25B6'; window.playerState.playing = false; };
+    v.onended = () => { $('#p-pp').textContent = '\u{1F504}'; window.playerState.playing = false; };
+    v.ontimeupdate = () => {
+        if (window.playerState.dragP) return;
+        const p = v.duration ? (v.currentTime/v.duration)*100 : 0;
+        $('#p-fill').style.width = p + '%';
+        $('#p-dot').style.left = p + '%';
+        $('#p-tcur').textContent = fm(v.currentTime);
+    };
+    v.onprogress = () => {
+        const n = v.buffered.length;
+        if (n) $('#p-buf').style.width = v.duration ? (v.buffered.end(n-1)/v.duration)*100 + '%' : '0%';
+    };
+    v.oncontextmenu = e => e.preventDefault();
+    v.onerror = () => { $('#player-loading').style.display = 'none'; showToast('视频加载失败'); };
+
+    // Buttons
+    $('#p-pp').onclick = () => v.paused ? v.play().catch(() => {}) : v.pause();
+    $('#p-fs').onclick = () => {
+        if (window.currentDetail?.isLocal) {
+            const ep = window.currentDetail.episodes?.find(e => e.index === window.playerState.currentEp);
+            if (ep && ep.path) {
+                callNativeLegacy('getLocalVideoUrl', ep.path).then(function(contentUrl) {
+                    window.Sakura.playLocalFromUrl(contentUrl, window.currentDetail.title, window.playerState.currentEp);
+                });
+            }
+        } else {
+            callNativeLegacy('openFullscreen', window.currentDetail?.videoId || 0,
+                window.currentDetail?.title || '', window.playerState.currentEp).catch(() => {});
+        }
+    };
+    $('#p-lock').onclick = () => toggleLock();
+
+    // Progress bar drag
+    const track = $('#p-track');
+    track.onpointerdown = e => {
+        if (window.playerState.locked) return;
+        window.playerState.dragP = true;
+        track.setPointerCapture(e.pointerId);
+        $('#p-dot').style.transform = 'translate(-50%,-50%) scale(1.4)';
+        setProg(e.clientX);
+        const pv = $('#p-seek-pv');
+        pv.querySelector('.cur').textContent = fm(v.currentTime);
+        pv.querySelector('.total').textContent = fm(v.duration);
+        pv.classList.add('on');
+    };
+    document.onpointermove = e => {
+        if (!window.playerState.dragP || window.playerState.locked) return;
+        setProg(e.clientX);
+        $('#p-seek-pv').querySelector('.cur').textContent = fm(v.currentTime);
+    };
+    document.onpointerup = () => {
+        if (!window.playerState.dragP) return;
+        window.playerState.dragP = false;
+        $('#p-dot').style.transform = 'translate(-50%,-50%)';
+        $('#p-seek-pv').classList.remove('on');
+        const pc = v.duration ? (v.currentTime/v.duration)*100 : 0;
+        $('#p-fill').style.width = pc + '%';
+        $('#p-dot').style.left = pc + '%';
+    };
+
+    function setProg(clientX) {
+        const r = $('#p-inner').getBoundingClientRect();
+        const p = Math.max(0, Math.min(1, (clientX - r.left) / r.width));
+        v.currentTime = p * v.duration;
+        $('#p-fill').style.width = (p*100) + '%';
+        $('#p-dot').style.left = Math.round(clientX - r.left) + 'px';
+    }
+
+    // ===== Gestures =====
+    const area = $('#player-area');
+    const zone = x => x < window.innerWidth*.25 ? 'bri' : x > window.innerWidth*.75 ? 'vol' : 'seek';
+
+    area.ontouchstart = e => {
+        if (window.playerState.dragP || e.target.closest('#p-track')) return;
+        if (e.touches.length !== 1) return;
+        const t = e.touches[0];
+        playerTouch = { x:t.clientX, y:t.clientY, lx:t.clientX, ly:t.clientY,
+            vol:v.volume, bri:window.playerState.bri, time:v.currentTime, seekT:0, lastTap: playerTouch.lastTap };
+        playerGest = { type: null, lpFired: false, lpTimer: null, tapTimer: null };
+        clearTimeout(playerGest.lpTimer);
+        playerGest.lpTimer = setTimeout(() => {
+            if (!playerGest.type) { playerGest.lpFired = true; v.playbackRate = 2; showPTip('2x 快放中'); }
+        }, 500);
+    };
+
+    area.ontouchmove = e => {
+        if (window.playerState.dragP || e.touches.length !== 1 || window.playerState.locked) return;
+        const t = e.touches[0];
+        const ddx = t.clientX - playerTouch.lx, ddy = t.clientY - playerTouch.ly;
+        const tdx = t.clientX - playerTouch.x, tdy = t.clientY - playerTouch.y;
+        const atdx = Math.abs(tdx), atdy = Math.abs(tdy);
+
+        if (!playerGest.type) {
+            if (atdx > atdy && atdx > 10) playerGest.type = 'seek';
+            else if (atdy > atdx && atdy > 10) { const z = zone(playerTouch.x); playerGest.type = (z === 'bri' || z === 'vol') ? z : null; }
+            if (playerGest.type === 'seek' && playerGest.lpFired) clearTimeout(playerGest.lpTimer);
+            if ((playerGest.type === 'bri' || playerGest.type === 'vol') && playerGest.lpFired) {
+                v.playbackRate = 1; $('#p-tip-speed').classList.remove('on'); playerGest.lpFired = false;
+            }
+        }
+        if (!playerGest.type && !playerGest.lpFired) return;
+        e.preventDefault();
+        playerTouch.lx = t.clientX; playerTouch.ly = t.clientY;
+
+        if (playerGest.type === 'seek') {
+            playerTouch.seekT += ddx * 0.15;
+            const to = Math.max(0, Math.min(v.duration, playerTouch.time + playerTouch.seekT));
+            const pv = $('#p-seek-pv');
+            pv.querySelector('.cur').textContent = fm(to);
+            pv.querySelector('.total').textContent = fm(v.duration);
+            pv.classList.add('on');
+            $('#p-fill').style.width = (to/v.duration*100) + '%';
+        }
+        if (playerGest.type === 'bri') {
+            const rH = 400;
+            window.playerState.bri = Math.max(0, Math.min(1, playerTouch.bri + tdy/(rH*.5)));
+            showPHud('bri', Math.round((1-window.playerState.bri)*100));
+        }
+        if (playerGest.type === 'vol') {
+            const rH = 400;
+            v.volume = Math.max(0, Math.min(1, playerTouch.vol - tdy/(rH*.5)));
+            showPHud('vol', Math.round(v.volume*100));
+        }
+    };
+
+    area.ontouchend = () => {
+        clearTimeout(playerGest.lpTimer);
+        if (playerGest.lpFired) { v.playbackRate = 1; $('#p-tip-speed').classList.remove('on'); playerGest.lpFired = false; }
+        if (playerGest.type === 'seek') {
+            v.currentTime = Math.max(0, Math.min(v.duration, playerTouch.time + playerTouch.seekT));
+            $('#p-seek-pv').classList.remove('on');
+        }
+        const had = playerGest.type || playerGest.lpFired; playerGest.type = null;
+        if (had || window.playerState.locked) return;
+        const now = Date.now();
+        if (now - playerTouch.lastTap < 280) { clearTimeout(playerGest.tapTimer); v.paused ? v.play() : v.pause(); playerTouch.lastTap = 0; }
+        else { playerTouch.lastTap = now; playerGest.tapTimer = setTimeout(() => { playerTouch.lastTap = 0; }, 280); }
+    };
+}
 
 function toggleLock() {
     window.playerState.locked = !window.playerState.locked;
@@ -465,23 +581,6 @@ async function checkFollowStatus(videoId) {
     } catch(e) {}
 }
 
-// ==================== Native SakuraPlayer callbacks ====================
-
-/** Called by native when SakuraPlayer state changes (playing/position/duration etc.). */
-window.onPlayerStateChanged = function(state) {
-    try {
-        window.playerState.playing = state.playing;
-        if (state.playing) {
-            $('#player-loading').style.display = 'none';
-        }
-    } catch(e) {}
-};
-
-/** Called by native when user switches episode via SakuraPlayer control bar. */
-window.onPlayerEpisodeChange = function(idx) {
-    playEpisode(idx);
-};
-
 // ==================== Overlay close hook - release ExoPlayer ====================
 
 (function() {
@@ -495,8 +594,6 @@ window.onPlayerEpisodeChange = function(idx) {
         var top = (stack && stack.length > 0) ? stack[stack.length - 1] : null;
         if (top === 'detail') {
             resetPlayer();
-            // Hide native SakuraPlayer
-            try { window.Sakura.setSakuraPlayerVisible(false); } catch(e) {}
         }
         return origCloseOverlay.apply(this, arguments);
     };
@@ -508,7 +605,6 @@ window.onPlayerEpisodeChange = function(idx) {
         var oldTop = (oldStack && oldStack.length > 0) ? oldStack[oldStack.length - 1] : null;
         if (oldTop === 'detail' && tab !== currentTab) {
             resetPlayer();
-            try { window.Sakura.setSakuraPlayerVisible(false); } catch(e) {}
         }
         return origSwitchTab.apply(this, arguments);
     };

@@ -6,12 +6,12 @@ plugins {
 
 android {
     namespace = "com.sakura.player"
-    compileSdk = 34
+    compileSdk = 35
 
     defaultConfig {
         applicationId = "com.sakura.player"
         minSdk = 24
-        targetSdk = 34
+        targetSdk = 35
         versionCode = 1
         versionName = "1.0.0"
     }
@@ -76,4 +76,7 @@ dependencies {
     implementation("com.google.android.material:material:1.11.0")
     // DocumentFile for SAF
     implementation("androidx.documentfile:documentfile:1.0.1")
+    // GSYVideoPlayer
+    implementation("io.github.carguo:gsyvideoplayer:11.1.0")
+    implementation("io.github.carguo:gsyvideoplayer-exo2:11.1.0")
 }
