@@ -45,11 +45,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var bridge: JsBridge
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
-    // ExoPlayer for local file playback
-    private lateinit var localPlayerView: PlayerView
-    private var exoPlayer: ExoPlayer? = null
-    @Volatile private var cachedPlayerState: String = "{}"
-
     // SakuraPlayer — 6-layer native player for inline + fullscreen playback
     private lateinit var sakuraPlayer: SakuraPlayerView
     private lateinit var playerBridge: PlayerBridge
@@ -146,7 +141,6 @@ class MainActivity : AppCompatActivity() {
             bridge = JsBridge(this@MainActivity)
             bridge.setEvaluator { js -> evalJs(js) }
             addJavascriptInterface(WebAppInterface(), "Sakura")
-            addJavascriptInterface(LocalPlayerBridge(), "LocalPlayer")
 
             loadUrl("file:///android_asset/www/index.html")
 
@@ -206,16 +200,6 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // Create PlayerView for local file ExoPlayer playback
-        localPlayerView = PlayerView(this).apply {
-            id = View.generateViewId()
-            visibility = View.GONE
-            useController = false
-            controllerAutoShow = false
-            resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
-            setBackgroundColor(0xFF000000.toInt())
-        }
-
         // Create SakuraPlayerView (6-layer B站-style player) — hidden until playback starts
         sakuraPlayer = SakuraPlayerView(this).apply {
             visibility = View.GONE
@@ -242,21 +226,14 @@ class MainActivity : AppCompatActivity() {
                 evalJs("if(window.onPlayerEpisodeChange)window.onPlayerEpisodeChange($idx)")
             }
             onStateChanged = { state ->
-                // Sync state back to JS if needed
-                val json = JSONObject().apply {
-                    put("playing", state.playing)
-                    put("position", state.position)
-                    put("duration", state.duration)
-                    put("currentEp", state.currentEp)
-                    put("speed", state.speed.toDouble())
-                }.toString()
-                evalJs("if(window.onPlayerStateChanged)window.onPlayerStateChanged($json)")
+                // Pass state as JS object directly (no JSON.parse needed in JS)
+                val js = """{playing:${state.playing},position:${state.position},duration:${state.duration},currentEp:${state.currentEp},speed:${state.speed}}"""
+                evalJs("if(window.onPlayerStateChanged)window.onPlayerStateChanged($js)")
             }
         }
 
-        // Add views to root in correct z-order: WebView (bottom), PlayerView (mid), SakuraPlayer (top)
+        // Add views: WebView (bottom), SakuraPlayer (top)
         rootLayout.addView(webView)
-        rootLayout.addView(localPlayerView)
         rootLayout.addView(sakuraPlayer)
 
         playerBridge = PlayerBridge(
@@ -333,225 +310,8 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ==================== LocalPlayer ExoPlayer Bridge ====================
-
-    inner class LocalPlayerBridge {
-        /**
-         * Start playing a local file with ExoPlayer.
-         * @param path Absolute file path (e.g., /storage/emulated/0/SakuraAnime/video.mp4)
-         * @param xPx Player area left in physical pixels (= CSS px * devicePixelRatio)
-         * @param yPx Player area top in physical pixels
-         * @param wPx Player area width in physical pixels
-         * @param hPx Player area height in physical pixels (minus control bar space)
-         */
-        @JavascriptInterface
-        fun play(path: String, xPx: Int, yPx: Int, wPx: Int, hPx: Int) {
-            runOnUiThread {
-                Log.d(TAG, "LocalPlayer.play: path=$path, rect=($xPx,$yPx,${wPx}x$hPx)")
-                try {
-                    val file = File(path)
-                    if (!file.exists()) {
-                        evalJs("if(window.showToast)window.showToast('文件不存在: $path')")
-                        return@runOnUiThread
-                    }
-
-                    // Position and size PlayerView
-                    val params = localPlayerView.layoutParams as FrameLayout.LayoutParams
-                    params.leftMargin = xPx
-                    params.topMargin = yPx
-                    params.width = wPx
-                    params.height = hPx
-                    localPlayerView.layoutParams = params
-
-                    // Create or reuse ExoPlayer
-                    if (exoPlayer == null) {
-                        exoPlayer = ExoPlayer.Builder(this@MainActivity)
-                            .build()
-                            .apply {
-                                addListener(ExoPlayerListener())
-                            }
-                        localPlayerView.player = exoPlayer
-                    }
-
-                    val player = exoPlayer!!
-                    player.stop()
-                    player.setMediaItem(MediaItem.fromUri(Uri.fromFile(file)))
-                    player.prepare()
-                    player.playWhenReady = true
-
-                    // Show PlayerView, hide WebView video elements
-                    localPlayerView.visibility = View.VISIBLE
-                    evalJs("""
-                        (function(){
-                            var dv = document.getElementById('detail-video');
-                            if (dv) { dv.style.display = 'none'; dv.pause(); dv.src = ''; }
-                            var pc = document.getElementById('player-cover');
-                            if (pc) pc.style.display = 'none';
-                            var pl = document.getElementById('player-loading');
-                            if (pl) pl.style.display = 'none';
-                            if (typeof bindLocalPlayerControls === 'function') bindLocalPlayerControls();
-                        })();
-                    """.trimIndent())
-                } catch (e: Exception) {
-                    Log.e(TAG, "LocalPlayer.play failed", e)
-                    evalJs("if(window.showToast)window.showToast('播放失败: ${e.message?.replace("'", "\\'")}')")
-                }
-            }
-        }
-
-        @JavascriptInterface
-        fun pause() {
-            runOnUiThread { exoPlayer?.pause() }
-        }
-
-        @JavascriptInterface
-        fun resume() {
-            runOnUiThread { exoPlayer?.play() }
-        }
-
-        @JavascriptInterface
-        fun toggle() {
-            runOnUiThread {
-                exoPlayer?.let {
-                    if (it.playWhenReady) it.pause() else it.play()
-                }
-            }
-        }
-
-        @JavascriptInterface
-        fun seek(positionMs: Long) {
-            runOnUiThread {
-                exoPlayer?.seekTo(positionMs.coerceIn(0, exoPlayer?.duration ?: 0))
-            }
-        }
-
-        @JavascriptInterface
-        fun seekRelative(deltaMs: Long) {
-            runOnUiThread {
-                exoPlayer?.let {
-                    val newPos = (it.currentPosition + deltaMs).coerceIn(0, it.duration)
-                    it.seekTo(newPos)
-                }
-            }
-        }
-
-        @JavascriptInterface
-        fun getState(): String {
-            return cachedPlayerState
-        }
-
-        @JavascriptInterface
-        fun release() {
-            runOnUiThread {
-                Log.d(TAG, "LocalPlayer.release")
-                progressUpdater.removeCallbacks(progressUpdateRunnable)
-                exoPlayer?.stop()
-                exoPlayer?.release()
-                exoPlayer = null
-                localPlayerView.player = null
-                localPlayerView.visibility = View.GONE
-                cachedPlayerState = "{}"
-                evalJs("if(window.onLocalPlayerReleased)window.onLocalPlayerReleased()")
-            }
-        }
-    }
-
-    private val progressUpdater = Handler(Looper.getMainLooper())
-    private val progressUpdateRunnable = object : Runnable {
-        override fun run() {
-            updateCachedPlayerState()
-            if (exoPlayer?.playWhenReady == true) {
-                progressUpdater.postDelayed(this, 250)
-            }
-        }
-    }
-
-    private inner class ExoPlayerListener : Player.Listener {
-        override fun onPlaybackStateChanged(state: Int) {
-            updateCachedPlayerState()
-            when (state) {
-                Player.STATE_READY -> {
-                    progressUpdater.removeCallbacks(progressUpdateRunnable)
-                    if (exoPlayer?.playWhenReady == true) {
-                        progressUpdater.post(progressUpdateRunnable)
-                    }
-                    evalJs("""
-                        (function(){
-                            var pl = document.getElementById('player-loading');
-                            if (pl) pl.style.display = 'none';
-                        })();
-                    """.trimIndent())
-                }
-                Player.STATE_ENDED -> {
-                    progressUpdater.removeCallbacks(progressUpdateRunnable)
-                    updateCachedPlayerState()
-                    evalJs("""
-                        (function(){
-                            var pp = document.getElementById('p-pp');
-                            if (pp) pp.textContent = '\u{1F504}';
-                            if (window.playerState) window.playerState.playing = false;
-                        })();
-                    """.trimIndent())
-                }
-                Player.STATE_BUFFERING -> {
-                    evalJs("""
-                        (function(){
-                            var pl = document.getElementById('player-loading');
-                            if (pl) pl.style.display = '';
-                        })();
-                    """.trimIndent())
-                }
-            }
-        }
-
-        override fun onIsPlayingChanged(isPlaying: Boolean) {
-            updateCachedPlayerState()
-            if (isPlaying) {
-                progressUpdater.removeCallbacks(progressUpdateRunnable)
-                progressUpdater.post(progressUpdateRunnable)
-            } else {
-                progressUpdater.removeCallbacks(progressUpdateRunnable)
-            }
-            val icon = if (isPlaying) "\u23F8" else "\u25B6"
-            evalJs("""
-                (function(){
-                    var pp = document.getElementById('p-pp');
-                    if (pp) pp.textContent = '$icon';
-                    if (window.playerState) window.playerState.playing = $isPlaying;
-                })();
-            """.trimIndent())
-        }
-
-        override fun onPlayerError(error: PlaybackException) {
-            Log.e(TAG, "ExoPlayer error", error)
-            progressUpdater.removeCallbacks(progressUpdateRunnable)
-            evalJs("""
-                (function(){
-                    var pl = document.getElementById('player-loading');
-                    if (pl) pl.style.display = 'none';
-                    if (window.showToast) window.showToast('播放错误: ${error.message?.replace("'", "\\'")?.take(50)}');
-                })();
-            """.trimIndent())
-        }
-    }
-
-    private fun updateCachedPlayerState() {
-        val p = exoPlayer
-        if (p == null) {
-            cachedPlayerState = "{}"
-            return
-        }
-        cachedPlayerState = buildString {
-            append("{")
-            append("\"position\":${p.currentPosition},")
-            append("\"duration\":${p.duration},")
-            append("\"playing\":${p.playWhenReady},")
-            append("\"playbackState\":${p.playbackState}")
-            append("}")
-        }
-    }
-
     // ==================== JS Bridge Interface ====================
+
 
     inner class WebAppInterface {
         @JavascriptInterface fun search(keyword: String, callbackId: String) {
@@ -761,11 +521,13 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
 
-        // Resume half-screen SakuraPlayer with synced position from fullscreen
+        // Resume half-screen SakuraPlayer, syncing position from fullscreen
         val resumePos = JsBridge.lastFullscreenPosition
-        if (resumePos > 0 && ::sakuraPlayer.isInitialized) {
-            JsBridge.lastFullscreenPosition = 0
-            sakuraPlayer.exoPlayer?.seekTo(resumePos.coerceIn(0, sakuraPlayer.exoPlayer?.duration ?: 0))
+        JsBridge.lastFullscreenPosition = 0
+        if (::sakuraPlayer.isInitialized) {
+            if (resumePos > 0) {
+                sakuraPlayer.exoPlayer?.seekTo(resumePos.coerceIn(0, sakuraPlayer.exoPlayer?.duration ?: 0))
+            }
             sakuraPlayer.resume()
         }
 
@@ -781,11 +543,6 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         scope.cancel()
-        // Release ExoPlayer
-        exoPlayer?.stop()
-        exoPlayer?.release()
-        exoPlayer = null
-        // Release SakuraPlayer
         if (::sakuraPlayer.isInitialized) sakuraPlayer.release()
         super.onDestroy()
     }

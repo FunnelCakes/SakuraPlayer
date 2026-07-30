@@ -52,7 +52,7 @@ class PlayerLayer(private val ctx: Context) {
 
     val isPlaying: Boolean get() = player.playWhenReady
     val currentPosition: Long get() = player.currentPosition
-    val duration: Long get() = if (player.duration > 0) player.duration else 1L
+    val duration: Long get() = if (player.duration > 0) player.duration else 0L
 
     fun togglePlayPause() { player.playWhenReady = !player.playWhenReady }
     fun pause() { player.pause() }

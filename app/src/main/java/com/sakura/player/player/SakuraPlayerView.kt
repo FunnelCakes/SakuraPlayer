@@ -66,8 +66,10 @@ class SakuraPlayerView @JvmOverloads constructor(
                 val dur = playerLayer.duration
                 val playing = playerLayer.isPlaying
                 controlBar.duration = dur
-                controlBar.updateTime(pos, dur)
-                controlBar.updateProgress(pos.toFloat() / dur, playerLayer.getBufferedPercent() / 100f)
+                if (dur > 0) {
+                    controlBar.updateTime(pos, dur)
+                    controlBar.updateProgress(pos.toFloat() / dur, playerLayer.getBufferedPercent() / 100f)
+                }
                 controlBar.updatePlayPause(playing)
                 if (playing) progressHandler.postDelayed(this, 250)
                 else progressHandler.postDelayed(this, 500)
@@ -81,6 +83,7 @@ class SakuraPlayerView @JvmOverloads constructor(
 
     fun setup(config: PlayerConfig) {
         this.config = config
+        if (::playerLayer.isInitialized) playerLayer.release()
         removeAllViews()
         buildLayers()
     }
@@ -305,11 +308,11 @@ class SakuraPlayerView @JvmOverloads constructor(
         playerLayer.onReady = {
             hideLoading()
             controlBar.updatePlayPause(true)
-            onStateChanged?.invoke(PlayerState(true, playerLayer.currentPosition, playerLayer.duration, 0, 1f))
+            onStateChanged?.invoke(PlayerState(true, playerLayer.currentPosition, playerLayer.duration, currentEpisodeIndex, currentSpeed))
         }
         playerLayer.onEnded = {
             controlBar.updatePlayPause(false)
-            onStateChanged?.invoke(PlayerState(false, playerLayer.currentPosition, playerLayer.duration, 0, 1f))
+            onStateChanged?.invoke(PlayerState(false, playerLayer.currentPosition, playerLayer.duration, currentEpisodeIndex, currentSpeed))
         }
         playerLayer.onError = { msg ->
             hideLoading()

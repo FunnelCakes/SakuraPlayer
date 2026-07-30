@@ -468,9 +468,8 @@ async function checkFollowStatus(videoId) {
 // ==================== Native SakuraPlayer callbacks ====================
 
 /** Called by native when SakuraPlayer state changes (playing/position/duration etc.). */
-window.onPlayerStateChanged = function(json) {
+window.onPlayerStateChanged = function(state) {
     try {
-        var state = JSON.parse(json);
         window.playerState.playing = state.playing;
         if (state.playing) {
             $('#player-loading').style.display = 'none';
