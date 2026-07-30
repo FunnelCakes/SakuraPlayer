@@ -674,8 +674,21 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun wireFullscreenButton() {
-        val btn = gsyPlayer.fullscreenButton ?: return
+        val btn = gsyPlayer.fullscreenButton
+        if (btn == null) {
+            Log.e("SakuraMain", "wireFullscreenButton: fullscreenButton is null, will retry")
+            gsyPlayer.postDelayed({ wireFullscreenButton() }, 500)
+            return
+        }
+        Log.e("SakuraMain", "wireFullscreenButton: wiring fullscreen button")
+        // Clear GSY's touch listener (GSY's onTouch returns false for fullscreen,
+        // but clearing it removes any risk of touch consumption)
+        btn.setOnTouchListener(null)
+        // Ensure the button can receive click events
+        btn.isClickable = true
+        btn.isEnabled = true
         btn.setOnClickListener {
+            Log.e("SakuraMain", "Fullscreen button clicked: isLocal=$currentIsLocal playing=${gsyPlayer.isInPlayingState} pos=${gsyPlayer.currentPositionWhenPlaying}")
             val intent = Intent(this@MainActivity, PlayerActivity::class.java).apply {
                 putExtra("source", if (currentIsLocal) "local" else "online")
                 if (currentIsLocal) putExtra("path", currentFilePath)
@@ -705,8 +718,11 @@ class MainActivity : AppCompatActivity() {
         if (::gsyPlayer.isInitialized) {
             val pos = JsBridge.lastFullscreenPosition
             if (pos > 0 && gsyPlayer.visibility == View.VISIBLE) {
-                // Returning from fullscreen: restore position and play state
-                gsyPlayer.onVideoResume()
+                // Returning from fullscreen: re-prepare with saved position and play state.
+                // Do NOT call onVideoResume() first — it would seek to the pre-fullscreen
+                // position and auto-play. Instead, use seekOnStart + startPlayLogic() which
+                // handles surface setup, re-preparation, and seeking in one clean flow.
+                Log.e("SakuraMain", "Restoring from fullscreen: pos=$pos playing=${JsBridge.lastFullscreenWasPlaying}")
                 gsyPlayer.seekOnStart = pos
                 gsyPlayer.startPlayLogic()
                 if (!JsBridge.lastFullscreenWasPlaying) {

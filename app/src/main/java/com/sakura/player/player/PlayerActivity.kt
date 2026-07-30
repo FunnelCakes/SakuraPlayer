@@ -24,6 +24,7 @@ class PlayerActivity : AppCompatActivity() {
     private val TAG = "PlayerActivity"
     private lateinit var gsyPlayer: StandardGSYVideoPlayer
     private var orientationUtils: OrientationUtils? = null
+    private var shouldBePlaying = true // Track play state from intent
 
     companion object {
         const val EXTRA_SOURCE = "source"
@@ -50,7 +51,7 @@ class PlayerActivity : AppCompatActivity() {
         val source = intent.getStringExtra(EXTRA_SOURCE) ?: "online"
         val title = intent.getStringExtra(EXTRA_TITLE) ?: ""
         val position = intent.getLongExtra(EXTRA_POSITION, 0)
-        val playing = intent.getBooleanExtra(EXTRA_PLAYING, true)
+        shouldBePlaying = intent.getBooleanExtra(EXTRA_PLAYING, true)
 
         // Create GSY player
         gsyPlayer = StandardGSYVideoPlayer(this).apply {
@@ -94,7 +95,7 @@ class PlayerActivity : AppCompatActivity() {
 
         gsyPlayer.startPlayLogic()
 
-        if (!playing) {
+        if (!shouldBePlaying) {
             gsyPlayer.postDelayed({ gsyPlayer.onVideoPause() }, 100)
         }
 
@@ -113,8 +114,13 @@ class PlayerActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         gsyPlayer.onVideoResume()
-        // Stay paused on return from background
-        gsyPlayer.onVideoPause()
+        // Respect the play state: if video should be paused, pause it.
+        // The onCreate already set up the correct state, but onResume
+        // fires after onCreate and calls onVideoResume() which auto-starts.
+        // Only pause if the user was NOT playing before entering fullscreen.
+        if (!shouldBePlaying) {
+            gsyPlayer.onVideoPause()
+        }
     }
 
     override fun onDestroy() {
