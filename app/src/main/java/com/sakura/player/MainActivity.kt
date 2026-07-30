@@ -220,6 +220,8 @@ class MainActivity : AppCompatActivity() {
         sakuraPlayer = SakuraPlayerView(this).apply {
             visibility = View.GONE
             onFullscreenRequest = {
+                // Pause half-screen player to avoid dual audio
+                sakuraPlayer.pause()
                 val pos = sakuraPlayer.getPlayerState().position
                 val episodesJson = buildEpisodesJson()
                 val intent = Intent(this@MainActivity, PlayerActivity::class.java).apply {
@@ -759,19 +761,12 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
 
-        // Resume SakuraPlayer from fullscreen position if returning from PlayerActivity
+        // Resume half-screen SakuraPlayer with synced position from fullscreen
         val resumePos = JsBridge.lastFullscreenPosition
-        if (resumePos > 0) {
+        if (resumePos > 0 && ::sakuraPlayer.isInitialized) {
             JsBridge.lastFullscreenPosition = 0
-            sakuraPlayer.exoPlayer?.let {
-                it.seekTo(resumePos.coerceIn(0, it.duration))
-                it.playWhenReady = true
-            }
-            // Also resume legacy exoPlayer if active
-            exoPlayer?.let {
-                it.seekTo(resumePos.coerceIn(0, it.duration))
-                it.play()
-            }
+            sakuraPlayer.exoPlayer?.seekTo(resumePos.coerceIn(0, sakuraPlayer.exoPlayer?.duration ?: 0))
+            sakuraPlayer.resume()
         }
 
         val dlDir = File(SettingsPrefs.downloadPath)

@@ -105,6 +105,18 @@ class SakuraPlayerView @JvmOverloads constructor(
         if (::playerLayer.isInitialized) playerLayer.release()
     }
 
+    fun pause() {
+        if (::playerLayer.isInitialized) playerLayer.pause()
+        progressHandler.removeCallbacks(progressRunnable)
+    }
+
+    fun resume() {
+        if (::playerLayer.isInitialized) {
+            playerLayer.play()
+            progressHandler.post(progressRunnable)
+        }
+    }
+
     fun togglePlayPause() {
         playerLayer.togglePlayPause()
         controlBar.updatePlayPause(playerLayer.isPlaying)
@@ -267,11 +279,13 @@ class SakuraPlayerView @JvmOverloads constructor(
     private fun showVolumeHud(value: Int) = volumeHud.show(SideHUD.Type.VOLUME, value)
 
     private fun showEpisodePanel() {
-        episodePanel.toggle(config.episodes, currentEpisodeIndex)
+        val compact = config.mode == PlayerMode.INLINE
+        episodePanel.toggle(config.episodes, currentEpisodeIndex, compact)
     }
 
     private fun showSpeedPanel() {
-        speedPanel.toggle(currentSpeed)
+        val compact = config.mode == PlayerMode.INLINE
+        speedPanel.toggle(currentSpeed, compact)
     }
 
     // ── Layer construction ──

@@ -177,8 +177,6 @@ class ControlBar(context: Context) : FrameLayout(context) {
         btnNext.visibility = if (show) View.VISIBLE else View.GONE
         btnSpeed.visibility = if (show) View.VISIBLE else View.GONE
         btnEpisodes.visibility = if (show) View.VISIBLE else View.GONE
-        timeCurrent.visibility = if (show) View.VISIBLE else View.GONE
-        timeTotal.visibility = if (show) View.VISIBLE else View.GONE
     }
 
     fun show() {
