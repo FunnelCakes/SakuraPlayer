@@ -101,9 +101,21 @@ class PlayerActivity : AppCompatActivity() {
 
         hideSystemUI()
 
-        // Set back button listener
-        gsyPlayer.backButton.visibility = View.VISIBLE
-        gsyPlayer.backButton.setOnClickListener { finish() }
+        // Wire GSY's back button and fullscreen/shrink button to finish().
+        // GSY's internal handlers try to call stopWindowFullscreen() which doesn't
+        // work because we're in a separate PlayerActivity (not using GSY's
+        // view-manipulation fullscreen). Delay to let GSY inflate controls.
+        gsyPlayer.postDelayed({
+            // Back button (← arrow, top-left)
+            gsyPlayer.backButton.visibility = View.VISIBLE
+            gsyPlayer.backButton.setOnClickListener { finish() }
+
+            // Fullscreen/shrink button (bottom-right, replaces enlarge button)
+            gsyPlayer.fullscreenButton?.setOnClickListener { finish() }
+            // Clear GSY's internal touch listener so it doesn't consume events
+            gsyPlayer.fullscreenButton?.setOnTouchListener(null)
+            gsyPlayer.backButton?.setOnTouchListener(null)
+        }, 800)
     }
 
     override fun onPause() {
