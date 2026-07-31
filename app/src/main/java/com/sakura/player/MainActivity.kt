@@ -37,6 +37,7 @@ import com.sakura.player.follow.UpdateChecker
 import com.sakura.player.player.PlayerActivity
 import com.shuyu.gsyvideoplayer.GSYVideoManager
 import com.shuyu.gsyvideoplayer.video.StandardGSYVideoPlayer
+import com.shuyu.gsyvideoplayer.video.base.GSYVideoViewBridge
 import kotlinx.coroutines.*
 import java.io.File
 
@@ -222,6 +223,9 @@ class MainActivity : AppCompatActivity() {
             backButton.visibility = View.GONE
             titleTextView.visibility = View.GONE
         }
+
+        // Disable mobile data warning dialog in GSYVideoPlayer
+        disableGsyNetworkWarning()
 
         // Add views to root: WebView first (bottom), PlayerView on top, GSY on topmost
         rootLayout.addView(webView)
@@ -704,6 +708,33 @@ class MainActivity : AppCompatActivity() {
 
     // ==================== Helpers ====================
 
+    /**
+     * Disable GSYVideoPlayer's "using mobile data?" dialog.
+     * GSYVideoBasePlayer.mNeedShowWifiTip is a boolean field that controls whether
+     * the warning dialog is shown. It is typically set via GSYVideoOptionBuilder,
+     * but we use reflection to disable it directly since we use setUp() instead.
+     */
+    private fun disableGsyNetworkWarning() {
+        try {
+            // Walk up the class hierarchy to find mNeedShowWifiTip
+            var cls: Class<*>? = StandardGSYVideoPlayer::class.java
+            while (cls != null && cls != Any::class.java) {
+                try {
+                    val field = cls.getDeclaredField("mNeedShowWifiTip")
+                    field.isAccessible = true
+                    field.setBoolean(gsyPlayer, false)
+                    Log.e(TAG, "Disabled GSY WiFi tip via field ${cls.simpleName}.mNeedShowWifiTip")
+                    return
+                } catch (_: NoSuchFieldException) {
+                    cls = cls.superclass
+                }
+            }
+            Log.e(TAG, "Could not find mNeedShowWifiTip field to disable WiFi tip")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to disable GSY WiFi tip", e)
+        }
+    }
+
     fun evalJs(js: String) {
         runOnUiThread {
             try { webView.evaluateJavascript(js, null) }
@@ -718,17 +749,29 @@ class MainActivity : AppCompatActivity() {
         if (::gsyPlayer.isInitialized) {
             val pos = JsBridge.lastFullscreenPosition
             if (pos > 0 && gsyPlayer.visibility == View.VISIBLE) {
-                // Returning from fullscreen: re-prepare with saved position and play state.
-                // Do NOT call onVideoResume() first — it would seek to the pre-fullscreen
-                // position and auto-play. Instead, use seekOnStart + startPlayLogic() which
-                // handles surface setup, re-preparation, and seeking in one clean flow.
+                // Returning from fullscreen: resume surface (no re-prepare),
+                // seek to saved position, restore play state.
                 Log.e("SakuraMain", "Restoring from fullscreen: pos=$pos playing=${JsBridge.lastFullscreenWasPlaying}")
-                gsyPlayer.seekOnStart = pos
-                gsyPlayer.startPlayLogic()
-                if (!JsBridge.lastFullscreenWasPlaying) {
-                    gsyPlayer.postDelayed({ gsyPlayer.onVideoPause() }, 100)
+                gsyPlayer.onVideoResume()
+                // Seek the existing prepared player directly via GSYVideoViewBridge
+                // — avoid startPlayLogic() which re-prepares the entire media source.
+                val player = gsyPlayer.currentPlayer as? GSYVideoViewBridge
+                if (player != null) {
+                    Log.e("SakuraMain", "currentPlayer ready, seeking to $pos")
+                    player.seekTo(pos)
+                    if (JsBridge.lastFullscreenWasPlaying) {
+                        player.start()
+                    }
+                } else {
+                    // Fallback: if currentPlayer is somehow null, re-prepare
+                    Log.e("SakuraMain", "currentPlayer is null after onVideoResume, fallback to startPlayLogic")
+                    gsyPlayer.seekOnStart = pos
+                    gsyPlayer.startPlayLogic()
+                    if (!JsBridge.lastFullscreenWasPlaying) {
+                        gsyPlayer.postDelayed({ gsyPlayer.onVideoPause() }, 100)
+                    }
                 }
-                // Re-wire the fullscreen button after restart
+                // Re-wire the fullscreen button after restore
                 gsyPlayer.postDelayed({ wireFullscreenButton() }, 500)
             } else {
                 // Resume from background: just restore surface but stay paused

@@ -120,6 +120,12 @@ class PlayerActivity : AppCompatActivity() {
 
     override fun onPause() {
         super.onPause()
+        // Save state BEFORE pausing the player. onVideoPause() may mutate
+        // isInPlayingState, so we read it here while it still reflects the user's
+        // actual playing state at the moment they left fullscreen.
+        JsBridge.lastFullscreenPosition = gsyPlayer.currentPositionWhenPlaying
+        JsBridge.lastFullscreenWasPlaying = gsyPlayer.isInPlayingState
+        Log.e(TAG, "onPause saving: pos=${JsBridge.lastFullscreenPosition} playing=${JsBridge.lastFullscreenWasPlaying}")
         gsyPlayer.onVideoPause()
     }
 
@@ -137,9 +143,7 @@ class PlayerActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        // Save state for MainActivity to resume inline player
-        JsBridge.lastFullscreenPosition = gsyPlayer.currentPositionWhenPlaying
-        JsBridge.lastFullscreenWasPlaying = gsyPlayer.isInPlayingState
+        // State already saved in onPause() (before onVideoPause mutates it).
         GSYVideoManager.releaseAllVideos()
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
     }
