@@ -213,6 +213,11 @@ class MainActivity : AppCompatActivity() {
             id = View.generateViewId()
             visibility = View.GONE
             setIsTouchWiget(true)
+            setIsTouchWigetFull(true)
+            // Force landscape rotation when entering fullscreen.
+            // GSY's resolveByClick() only triggers when isLockLand is true;
+            // without this, the screen stays in portrait on startWindowFullscreen().
+            setLockLand(true)
             // Hide title/back button for inline mode
             backButton.visibility = View.GONE
             titleTextView.visibility = View.GONE
