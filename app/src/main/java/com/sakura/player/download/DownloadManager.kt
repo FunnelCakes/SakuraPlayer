@@ -257,12 +257,16 @@ object DownloadManager {
         val cdnProgress = ConcurrentHashMap<Int, Long>() // sid -> bytesDownloaded
         val raceJobs = mutableListOf<Job>()
 
+        // Reset main task progress so UI shows race state
+        task.progress = 0
+
         // Phase 1: Launch all CDNs in parallel
         for ((url, sid) in cdnUrls) {
             val raceTask = task.copy(
                 id = "${task.id}_race_$sid",
                 status = "downloading",
-                progress = 0
+                progress = 0,
+                downloaded = 0
             )
             val playPageUrl = "$domain/index.php/vod/play/id/${task.videoId}/sid/$sid/nid/${task.epIndex}.html"
             val job = launch(Dispatchers.IO) {
@@ -270,7 +274,7 @@ object DownloadManager {
                     TsDownloader.download(url, raceTask, playPageUrl,
                         onProgress = { t ->
                             cdnProgress[sid] = t.downloaded
-                            // Report progress from the leading CDN to the UI
+                            // Forward progress from the fastest CDN to the UI
                             if (t.progress > task.progress) {
                                 task.progress = t.progress
                                 task.speed = t.speed
@@ -291,19 +295,58 @@ object DownloadManager {
             raceJobs.add(job)
         }
 
-        // Wait for sampling period
-        delay(RACE_SAMPLE_SECONDS * 1000)
+        // Adaptive polling loop: exit early when a clear winner emerges
+        var winner: Int? = null
+        var waited = 0L
+        val pollInterval = 500L
+        val maxWait = RACE_SAMPLE_SECONDS * 1000
 
-        // Determine winner: most segments downloaded
-        val winner = cdnProgress.maxByOrNull { it.value }?.key
-            ?: cdnUrls.first().second // fallback to first if no progress yet
+        while (waited < maxWait && winner == null) {
+            delay(pollInterval)
+            waited += pollInterval
+
+            // Check: any CDN has meaningful progress?
+            val sorted = cdnProgress.entries
+                .filter { it.value > 0 }
+                .sortedByDescending { it.value }
+
+            if (sorted.isEmpty()) continue
+
+            val best = sorted[0]
+
+            // Early termination: best has > 500KB AND leads 2nd by 30%
+            if (best.value > 500_000L && (sorted.size == 1 || best.value > sorted[1].value * 1.3f)) {
+                winner = best.key
+                Log.e(TAG, "Early winner sid=$winner after ${waited}ms: ${best.value} bytes")
+                break
+            }
+
+            // Also win if any CDN downloaded > 2MB
+            if (best.value > 2_000_000L) {
+                winner = best.key
+                Log.e(TAG, "Early winner sid=$winner after ${waited}ms: >2MB downloaded")
+                break
+            }
+        }
+
+        // Fallback: pick the best after timeout
+        if (winner == null) {
+            winner = cdnProgress.maxByOrNull { it.value }?.key
+                ?: cdnUrls.first().second
+        }
 
         val winnerEntry = cdnUrls.find { it.second == winner }!!
         Log.e(TAG, "Race winner: sid=$winner (${cdnProgress[winner]} bytes), killing ${numCdns - 1} losers")
 
-        // Cancel losing CDNs and wait for them to fully stop
+        // Cancel losing CDNs and wait for them to stop (with timeout)
         raceJobs.forEach { it.cancel() }
-        raceJobs.forEach { it.join() }
+        try {
+            withTimeout(3000) {
+                raceJobs.forEach { it.join() }
+            }
+        } catch (_: TimeoutCancellationException) {
+            Log.e(TAG, "Race jobs did not cancel within timeout, proceeding anyway")
+        }
 
         // Clean up loser temp dirs with retry for stubborn file handles
         for ((_, sid) in cdnUrls) {
@@ -344,6 +387,7 @@ object DownloadManager {
 
         // Phase 2: Winner continues with full thread pool (resumes from downloaded segments)
         task.status = "downloading"
+        task.progress = 0
         Log.e(TAG, "Phase 2: sid=$winner with ${TsDownloader.CONCURRENT_THREADS} threads")
         val (url, _) = winnerEntry
         val playPageUrl = "$domain/index.php/vod/play/id/${task.videoId}/sid/$winner/nid/${task.epIndex}.html"

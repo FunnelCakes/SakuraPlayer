@@ -131,9 +131,10 @@ object TsDownloader {
         tempDir.mkdirs()
 
         try {
+            val startTime = System.currentTimeMillis()
             val completed = AtomicInteger(0)
             val total = info.segments.size
-            Log.e(TAG, "Downloading $total segments ($CONCURRENT_THREADS threads)")
+            Log.e(TAG, "Downloading $total segments ($threadCount threads)")
 
             // Count already-downloaded segments for resume
             val existingCount = (0 until total).count { i ->
@@ -154,6 +155,7 @@ object TsDownloader {
                 (0 until threadCount).map {
                     launch(Dispatchers.IO) {
                         while (true) {
+                            ensureActive()  // Cooperative cancellation check
                             val i = nextIdx.getAndIncrement()
                             if (i >= total) break
                             if (task.status != "downloading") return@launch
@@ -168,6 +170,7 @@ object TsDownloader {
 
                             while (retries > 0 && !success) {
                                 try {
+                                    ensureActive()  // Check for cancellation before each HTTP request
                                     val segReqBuilder = Request.Builder().url(info.segments[i]).get()
                                     HttpClient.browserHeaders(referer).forEach { (k, v) -> segReqBuilder.header(k, v) }
                                     downloadClient.newCall(segReqBuilder.build()).execute().use { resp ->
@@ -195,6 +198,13 @@ object TsDownloader {
 
                             val done = completed.incrementAndGet()
                             task.progress = ((done * 100) / total).coerceIn(1, 100)
+                            // Update downloaded bytes with actual segment size for CDN race tracking
+                            task.downloaded += segFile.length()
+                            // Track speed every ~20 segments
+                            if (done % 20 == 0) {
+                                val elapsed = (System.currentTimeMillis() - startTime) / 1000f
+                                if (elapsed > 0) task.speed = "${(task.downloaded / elapsed / 1024).toInt()}KB/s"
+                            }
                             if (done % 50 == 0 || done == 1) {
                                 Log.e(TAG, "Progress: $done/$total (${task.progress}%)")
                             }
