@@ -17,7 +17,6 @@ import com.sakura.player.download.DownloadTask
 import com.sakura.player.download.TsDownloader
 import com.sakura.player.data.DownloadRecordEntity
 import com.sakura.player.follow.FollowManager
-import com.sakura.player.player.PlayerActivity
 import com.sakura.player.scraper.AnimeScraper
 import com.sakura.player.scraper.AnimeResult
 import com.sakura.player.scraper.AnimeDetail
@@ -33,10 +32,6 @@ import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
 
 class JsBridge(private val ctx: Context) {
-    companion object {
-        var lastFullscreenPosition: Long = 0
-        var lastFullscreenWasPlaying: Boolean = false
-    }
     private val TAG = "JsBridge"
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private lateinit var domain: String
@@ -286,15 +281,11 @@ class JsBridge(private val ctx: Context) {
                     if (vu.m3u8Url.isNotEmpty()) { m3u8Url = vu.m3u8Url; break }
                 }
                 if (m3u8Url.isNotEmpty()) {
-                    withContext(Dispatchers.Main) {
-                        val intent = android.content.Intent(ctx, PlayerActivity::class.java).apply {
-                            putExtra(PlayerActivity.EXTRA_SOURCE, "online")
-                            putExtra(PlayerActivity.EXTRA_URL, m3u8Url)
-                            putExtra(PlayerActivity.EXTRA_TITLE, "$title 第${epIndex}集")
-                            flags = android.content.Intent.FLAG_ACTIVITY_NEW_TASK
-                        }
-                        ctx.startActivity(intent)
-                    }
+                    // Route through JS to use inline GSY player
+                    evalJs("""
+                        if (window._onOpenFullscreenResolved)
+                            window._onOpenFullscreenResolved('${m3u8Url}', ${videoId}, '${title.replace("'", "\\'")}', ${epIndex});
+                    """.trimIndent())
                     evalJs("$callback(null, {})")
                 } else {
                     evalJs("$callback('无法获取播放地址', null)")
@@ -306,13 +297,14 @@ class JsBridge(private val ctx: Context) {
     }
 
     fun playLocal(path: String) {
-        val intent = Intent(ctx, PlayerActivity::class.java).apply {
-            putExtra("source", "local")
-            putExtra("path", path)
-            putExtra("title", File(path).nameWithoutExtension)
-            putExtra("dir", File(path).parent ?: "")
-        }
-        ctx.startActivity(intent)
+        // Route through JS to use inline GSY player
+        evalJs("""
+            var detail = window.currentDetail;
+            if (detail && detail.episodes) {
+                var ep = detail.episodes.find(function(e) { return e.path === '${path.replace("'", "\\'")}'; });
+                if (ep && typeof playEpisode === 'function') { playEpisode(ep.index); }
+            }
+        """.trimIndent())
     }
 
     fun playLocalFromPath(path: String) {
@@ -330,14 +322,16 @@ class JsBridge(private val ctx: Context) {
     }
 
     fun playLocalFromUrl(contentUrl: String, title: String, epIndex: Int, positionMs: Long = 0) {
-        val intent = Intent(ctx, PlayerActivity::class.java).apply {
-            putExtra("source", "url")
-            putExtra("url", contentUrl)
-            putExtra("title", "$title 第${epIndex}集")
-            putExtra("position", positionMs)
-            flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK
-        }
-        ctx.startActivity(intent)
+        // Route through JS to use inline GSY player
+        val safeTitle = title.replace("'", "\\'")
+        evalJs("""
+            (function() {
+                var detail = window.currentDetail;
+                if (detail && detail.episodes && typeof playEpisode === 'function') {
+                    playEpisode(${epIndex});
+                }
+            })();
+        """.trimIndent())
     }
 
     // ==================== Local File Manager ====================

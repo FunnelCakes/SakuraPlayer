@@ -35,11 +35,6 @@
             </intent-filter>
         </activity>
 
-        <activity
-            android:name=".player.PlayerActivity"
-            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
-            android:theme="@style/Theme.SakuraPlayer.Fullscreen" />
-
         <service
             android:name=".AnimeService"
             android:foregroundServiceType="dataSync"

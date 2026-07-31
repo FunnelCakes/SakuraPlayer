@@ -34,10 +34,8 @@ import com.sakura.player.data.SettingsPrefs
 import com.sakura.player.download.DownloadManager
 import com.sakura.player.follow.FollowManager
 import com.sakura.player.follow.UpdateChecker
-import com.sakura.player.player.PlayerActivity
 import com.shuyu.gsyvideoplayer.GSYVideoManager
 import com.shuyu.gsyvideoplayer.video.StandardGSYVideoPlayer
-import com.shuyu.gsyvideoplayer.video.base.GSYVideoViewBridge
 import kotlinx.coroutines.*
 import java.io.File
 
@@ -54,10 +52,6 @@ class MainActivity : AppCompatActivity() {
 
     // GSYVideoPlayer for inline (half-screen) playback
     private lateinit var gsyPlayer: StandardGSYVideoPlayer
-    private var currentIsLocal: Boolean = false
-    private var currentFilePath: String = ""
-    private var currentM3u8Url: String = ""
-    private var currentTitle: String = ""
 
     // SAF directory picker for custom download path
     private val safPickerLauncher = registerForActivityResult(
@@ -561,16 +555,12 @@ class MainActivity : AppCompatActivity() {
         @JavascriptInterface fun playOnlineInline(videoId: Long, title: String, epIndex: Int,
                                                    episodesJson: String, xPx: Int, yPx: Int, wPx: Int, hPx: Int) {
             runOnUiThread {
-                currentIsLocal = false
-                currentFilePath = ""
-                currentTitle = title
                 scope.launch {
                     val m3u8 = bridge.resolveM3u8Url(videoId, epIndex)
                     if (m3u8 == null) {
                         evalJs("if(window.showToast)window.showToast('无法获取播放地址')")
                         return@launch
                     }
-                    currentM3u8Url = m3u8
                     positionAndSetupGsyPlayer(xPx, yPx, wPx, hPx, m3u8, true, title)
                 }
             }
@@ -579,17 +569,14 @@ class MainActivity : AppCompatActivity() {
         @JavascriptInterface fun playLocalInline(path: String, episodesJson: String,
                                                   xPx: Int, yPx: Int, wPx: Int, hPx: Int) {
             runOnUiThread {
-                currentIsLocal = true
-                currentFilePath = path
-                currentM3u8Url = ""
-                currentTitle = File(path).nameWithoutExtension
                 val file = File(path)
                 if (!file.exists()) {
                     evalJs("if(window.showToast)window.showToast('文件不存在: $path')")
                     return@runOnUiThread
                 }
+                val title = file.nameWithoutExtension
                 val uri = FileProvider.getUriForFile(this@MainActivity, "$packageName.fileprovider", file)
-                positionAndSetupGsyPlayer(xPx, yPx, wPx, hPx, uri.toString(), false, currentTitle)
+                positionAndSetupGsyPlayer(xPx, yPx, wPx, hPx, uri.toString(), false, title)
             }
         }
 
@@ -673,37 +660,22 @@ class MainActivity : AppCompatActivity() {
         gsyPlayer.setUp(url, isLive, title)
         gsyPlayer.startPlayLogic()
 
-        // Wire fullscreen button
-        gsyPlayer.postDelayed({ wireFullscreenButton() }, 300)
-    }
-
-    private fun wireFullscreenButton() {
-        val btn = gsyPlayer.fullscreenButton
-        if (btn == null) {
-            Log.e("SakuraMain", "wireFullscreenButton: fullscreenButton is null, will retry")
-            gsyPlayer.postDelayed({ wireFullscreenButton() }, 500)
-            return
-        }
-        Log.e("SakuraMain", "wireFullscreenButton: wiring fullscreen button")
-        // Clear GSY's touch listener (GSY's onTouch returns false for fullscreen,
-        // but clearing it removes any risk of touch consumption)
-        btn.setOnTouchListener(null)
-        // Ensure the button can receive click events
-        btn.isClickable = true
-        btn.isEnabled = true
-        btn.setOnClickListener {
-            Log.e("SakuraMain", "Fullscreen button clicked: isLocal=$currentIsLocal playing=${gsyPlayer.isInPlayingState} pos=${gsyPlayer.currentPositionWhenPlaying}")
-            val intent = Intent(this@MainActivity, PlayerActivity::class.java).apply {
-                putExtra("source", if (currentIsLocal) "local" else "online")
-                if (currentIsLocal) putExtra("path", currentFilePath)
-                else putExtra("url", currentM3u8Url)
-                putExtra("title", currentTitle)
-                putExtra("position", gsyPlayer.currentPositionWhenPlaying)
-                putExtra("playing", gsyPlayer.isInPlayingState)
+        // Wire fullscreen button to GSY's native startWindowFullscreen mechanism.
+        // This removes the player from our layout and places it in a fullscreen
+        // Window within the Activity, preserving all playback state automatically.
+        gsyPlayer.postDelayed({
+            val btn = gsyPlayer.fullscreenButton
+            if (btn != null) {
+                // Clear GSY's built-in touch listener (which is a no-op for fullscreen)
+                btn.setOnTouchListener(null)
+                btn.isClickable = true
+                btn.isEnabled = true
+                btn.setOnClickListener {
+                    Log.e(TAG, "Fullscreen button clicked: starting GSY native fullscreen")
+                    gsyPlayer.startWindowFullscreen(this@MainActivity, true, true)
+                }
             }
-            gsyPlayer.onVideoPause()
-            startActivity(intent)
-        }
+        }, 300)
     }
 
     // ==================== Helpers ====================
@@ -745,51 +717,11 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
 
-        // Restore GSY inline player state when returning from fullscreen
-        if (::gsyPlayer.isInitialized) {
-            val pos = JsBridge.lastFullscreenPosition
-            if (pos > 0 && gsyPlayer.visibility == View.VISIBLE) {
-                // Returning from fullscreen: resume surface (no re-prepare),
-                // seek to saved position, restore play state.
-                Log.e("SakuraMain", "Restoring from fullscreen: pos=$pos playing=${JsBridge.lastFullscreenWasPlaying}")
-                gsyPlayer.onVideoResume()
-                // Seek the existing prepared player directly via GSYVideoViewBridge
-                // — avoid startPlayLogic() which re-prepares the entire media source.
-                val player = gsyPlayer.currentPlayer as? GSYVideoViewBridge
-                if (player != null) {
-                    Log.e("SakuraMain", "currentPlayer ready, seeking to $pos")
-                    player.seekTo(pos)
-                    if (JsBridge.lastFullscreenWasPlaying) {
-                        player.start()
-                    }
-                } else {
-                    // Fallback: if currentPlayer is somehow null, re-prepare
-                    Log.e("SakuraMain", "currentPlayer is null after onVideoResume, fallback to startPlayLogic")
-                    gsyPlayer.seekOnStart = pos
-                    gsyPlayer.startPlayLogic()
-                    if (!JsBridge.lastFullscreenWasPlaying) {
-                        gsyPlayer.postDelayed({ gsyPlayer.onVideoPause() }, 100)
-                    }
-                }
-                // Re-wire the fullscreen button after restore
-                gsyPlayer.postDelayed({ wireFullscreenButton() }, 500)
-            } else {
-                // Resume from background: just restore surface but stay paused
-                gsyPlayer.onVideoResume()
-                gsyPlayer.onVideoPause()
-            }
-            JsBridge.lastFullscreenPosition = 0
-            JsBridge.lastFullscreenWasPlaying = false
-        }
-
-        // Legacy ExoPlayer resume from fullscreen (keep existing behavior)
-        if (JsBridge.lastFullscreenPosition > 0 && exoPlayer != null) {
-            val resumePos = JsBridge.lastFullscreenPosition
-            JsBridge.lastFullscreenPosition = 0
-            exoPlayer?.let {
-                it.seekTo(resumePos.coerceIn(0, it.duration))
-                it.play()
-            }
+        // GSY lifecycle: resume surface when returning to foreground.
+        // Fullscreen entry/exit is handled natively by startWindowFullscreen /
+        // clearFullscreenLayout — state is preserved in GSYVideoManager automatically.
+        if (::gsyPlayer.isInitialized && gsyPlayer.visibility == View.VISIBLE) {
+            gsyPlayer.onVideoResume()
         }
 
         val dlDir = File(SettingsPrefs.downloadPath)
@@ -817,6 +749,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onBackPressed() {
+        // If GSY fullscreen is active, exit fullscreen first
+        if (::gsyPlayer.isInitialized && GSYVideoManager.backFromWindowFull(this)) {
+            return
+        }
         webView.evaluateJavascript("handleBackPress(); window._shouldExit") { result ->
             if (result == "true") super.onBackPressed()
         }
