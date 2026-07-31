@@ -175,7 +175,7 @@ function closeOverlay() {
 let toastTimer;
 function showToast(msg, duration = 2000) {
     const t = $('#toast');
-    t.textContent = msg;
+    t.innerHTML = msg;
     t.classList.add('show');
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => t.classList.remove('show'), duration);
@@ -285,8 +285,11 @@ function closeDetail() { closeOverlay(); }
 function goSettings() { openOverlay('settings'); loadSettings(); }
 function closeSettings() { closeOverlay(); }
 
+function showDevLog() { openOverlay('devlog'); }
+function closeDevLog() { closeOverlay(); }
+
 function showAbout() {
-    showToast('樱花动漫播放器 v1.0.0\nB站风格 · 追番神器', 3000);
+    showToast('樱花动漫播放器 v1.0.0<br>作者: 奶球<br>ALL RIGHTS RESERVED.<br>出Ave Mujica7thS席', 3000);
 }
 
 // ==================== Discover Page ====================

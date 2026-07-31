@@ -24,6 +24,7 @@ data class DownloadRecordEntity(
     val title: String,
     val epIndex: Int,
     val coverUrl: String = "",
+    val sourceUrl: String = "",
     val updatedAt: Long = System.currentTimeMillis()
 )
 
@@ -108,7 +109,7 @@ val MIGRATION_1_2 = object : Migration(1, 2) {
     }
 }
 
-@Database(entities = [FollowEntity::class, WatchHistoryEntity::class, DownloadRecordEntity::class], version = 2)
+@Database(entities = [FollowEntity::class, WatchHistoryEntity::class, DownloadRecordEntity::class], version = 3)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun animeDao(): AnimeDao
 
@@ -122,7 +123,7 @@ abstract class AppDatabase : RoomDatabase() {
                     ctx.applicationContext,
                     AppDatabase::class.java,
                     "sakura_anime.db"
-                ).addMigrations(MIGRATION_1_2).build().also { INSTANCE = it }
+                ).addMigrations(MIGRATION_1_2).fallbackToDestructiveMigration().build().also { INSTANCE = it }
             }
         }
     }

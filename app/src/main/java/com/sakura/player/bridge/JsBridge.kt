@@ -246,7 +246,12 @@ class JsBridge(private val ctx: Context) {
             }
         }
 
-        delay(sampleMs)
+        // Adaptive wait: end as soon as any CDN returns a valid speed, max 1.5s
+        var waited = 0L
+        while (speeds.isEmpty() && waited < sampleMs) {
+            delay(100)
+            waited += 100
+        }
         probeScope.cancel()
 
         val best = speeds.maxByOrNull { it.value }?.key ?: entries[0].first
@@ -469,6 +474,10 @@ class JsBridge(private val ctx: Context) {
         val safeTitle = title.replace(Regex("[/\\\\:*?\"<>|]"), "_")
         val saveDir = "${SettingsPrefs.downloadPath}/$safeTitle"
         Log.e("SakuraDownload", "addDownload called: vid=$videoId title=$title ep=$epIndex dir=$saveDir coverUrl=$coverUrl")
+        // Download cover first so it's ready before the video finishes
+        if (coverUrl.isNotBlank()) {
+            com.sakura.player.local.LocalFileManager.downloadCover(videoId, coverUrl)
+        }
         val did = DownloadManager.addSingle(videoId, title, epIndex, epName, m3u8Url, saveDir, coverUrl)
         Log.e("SakuraDownload", "Download task created: $did")
         val intent = Intent(ctx, AnimeService::class.java).apply {
@@ -492,6 +501,11 @@ class JsBridge(private val ctx: Context) {
         }
         if (batch.isNotEmpty()) {
             Log.e("SakuraDownload", "addBatchDownload: ${batch.size} items, dir=$saveDir")
+            // Download cover upfront before starting downloads
+            if (coverUrl.isNotBlank()) {
+                val firstVid = batch[0].first // videoId of first item
+                com.sakura.player.local.LocalFileManager.downloadCover(firstVid, coverUrl)
+            }
             DownloadManager.addBatch(batch, saveDir, coverUrl)
         }
         val intent = Intent(ctx, AnimeService::class.java).apply {
@@ -629,13 +643,25 @@ class JsBridge(private val ctx: Context) {
             }
 
             for (record in allRecords) {
+                // Resolve real videoId from website search (record may have hash from syncMissingRecords)
+                // Use saved source URL if available, otherwise search for real videoId
+                // Prefer original videoId to preserve existing covers; only re-search if it looks like a hash
+                // Use original videoId (preserves covers); only re-search if it is clearly a hash
+                val realVideoId = if (record.videoId in 1L..99999999L && record.videoId != 0L) {
+                    record.videoId
+                } else if (record.sourceUrl.isNotBlank()) {
+                    record.videoId
+                } else {
+                    searchVideoIdForDir(record.title)
+                }
+                Log.e(TAG, "redownload: ${record.title} -> videoId=$realVideoId (was ${record.videoId})")
                 // Delete DB record first so dedup check doesn't block re-download
                 DownloadRecordManager.deleteRecord(record.localPath)
                 // Delete old file (best-effort)
                 File(record.localPath).delete()
                 val dir = File(record.localPath).parent ?: SettingsPrefs.downloadPath
                 DownloadManager.addSingle(
-                    videoId = record.videoId,
+                    videoId = realVideoId,
                     title = record.title,
                     epIndex = record.epIndex,
                     epName = "第${record.epIndex}集",

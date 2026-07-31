@@ -27,7 +27,7 @@ object LocalFileManager {
         .build()
 
     fun init(ctx: Context) {
-        coversDir = (ctx.getExternalFilesDir(null)?.absolutePath ?: ctx.filesDir.absolutePath) + "/covers"
+        coversDir = ctx.filesDir.absolutePath + "/covers"
         File(coversDir).mkdirs()
     }
 

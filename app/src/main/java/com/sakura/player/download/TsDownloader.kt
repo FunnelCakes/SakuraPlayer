@@ -130,109 +130,113 @@ object TsDownloader {
         val tempDir = File(task.saveDir, ".temp_${task.videoId}_${task.epIndex}$tempDirSuffix")
         tempDir.mkdirs()
 
-        val completed = AtomicInteger(0)
-        val total = info.segments.size
-        Log.e(TAG, "Downloading $total segments ($CONCURRENT_THREADS threads)")
+        try {
+            val completed = AtomicInteger(0)
+            val total = info.segments.size
+            Log.e(TAG, "Downloading $total segments ($CONCURRENT_THREADS threads)")
 
-        // Count already-downloaded segments for resume
-        val existingCount = (0 until total).count { i ->
-            val f = File(tempDir, "${i.toString().padStart(6, '0')}.ts")
-            f.exists() && f.length() > 0
-        }
-        if (existingCount > 0) {
-            completed.set(existingCount)
-            task.progress = ((existingCount * 100) / total).coerceAtLeast(1)
-            onProgress(task)
-            Log.e(TAG, "Resuming: $existingCount/$total segments already downloaded (${task.progress}%)")
-        }
+            // Count already-downloaded segments for resume
+            val existingCount = (0 until total).count { i ->
+                val f = File(tempDir, "${i.toString().padStart(6, '0')}.ts")
+                f.exists() && f.length() > 0
+            }
+            if (existingCount > 0) {
+                completed.set(existingCount)
+                task.progress = ((existingCount * 100) / total).coerceIn(1, 100)
+                onProgress(task)
+                Log.e(TAG, "Resuming: $existingCount/$total segments already downloaded (${task.progress}%)")
+            }
 
-        coroutineScope {
-            // Work-stealing: threads compete for next segment via atomic counter
-            // avoids idle threads when segment sizes are uneven
-            val nextIdx = java.util.concurrent.atomic.AtomicInteger(0)
-            (0 until threadCount).map {
-                launch(Dispatchers.IO) {
-                    while (true) {
-                        val i = nextIdx.getAndIncrement()
-                        if (i >= total) break
-                        if (task.status != "downloading") return@launch
+            coroutineScope {
+                // Work-stealing: threads compete for next segment via atomic counter
+                // avoids idle threads when segment sizes are uneven
+                val nextIdx = java.util.concurrent.atomic.AtomicInteger(0)
+                (0 until threadCount).map {
+                    launch(Dispatchers.IO) {
+                        while (true) {
+                            val i = nextIdx.getAndIncrement()
+                            if (i >= total) break
+                            if (task.status != "downloading") return@launch
 
-                        val segFile = File(tempDir, "${i.toString().padStart(6, '0')}.ts")
+                            val segFile = File(tempDir, "${i.toString().padStart(6, '0')}.ts")
 
-                        // Skip already-downloaded segments
-                        if (segFile.exists() && segFile.length() > 0) {
-                            val done = completed.incrementAndGet()
-                            task.progress = ((done * 100) / total).coerceAtLeast(1)
-                            if (done % 50 == 0) Log.e(TAG, "Progress (resume): $done/$total (${task.progress}%)")
-                            onProgress(task)
-                            continue
-                        }
+                            // Skip already-downloaded segments (already counted in completed)
+                            if (segFile.exists() && segFile.length() > 0) continue
 
-                        var success = false
-                        var retries = 3
+                            var success = false
+                            var retries = 3
 
-                        while (retries > 0 && !success) {
-                            try {
-                                val segReqBuilder = Request.Builder().url(info.segments[i]).get()
-                                HttpClient.browserHeaders(referer).forEach { (k, v) -> segReqBuilder.header(k, v) }
-                                downloadClient.newCall(segReqBuilder.build()).execute().use { resp ->
-                                    if (resp.isSuccessful) {
-                                        val raw = resp.body?.bytes() ?: return@use
-                                        val out = if (aesKey != null) {
-                                            val ivBytes = info.iv ?: ByteArray(16).apply {
-                                                for (j in 0..15) this[j] = ((i shr ((15 - j % 8) * 8)) and 0xFF).toByte()
-                                            }
-                                            decryptAes128(raw, aesKey, ivBytes)
-                                        } else raw
-                                        FileOutputStream(segFile).use { it.write(out) }
-                                        success = true
+                            while (retries > 0 && !success) {
+                                try {
+                                    val segReqBuilder = Request.Builder().url(info.segments[i]).get()
+                                    HttpClient.browserHeaders(referer).forEach { (k, v) -> segReqBuilder.header(k, v) }
+                                    downloadClient.newCall(segReqBuilder.build()).execute().use { resp ->
+                                        if (resp.isSuccessful) {
+                                            val raw = resp.body?.bytes() ?: return@use
+                                            val out = if (aesKey != null) {
+                                                val ivBytes = info.iv ?: ByteArray(16).apply {
+                                                    for (j in 0..15) this[j] = ((i shr ((15 - j % 8) * 8)) and 0xFF).toByte()
+                                                }
+                                                decryptAes128(raw, aesKey, ivBytes)
+                                            } else raw
+                                            FileOutputStream(segFile).use { it.write(out) }
+                                            success = true
+                                        }
                                     }
+                                } catch (e: CancellationException) {
+                                    throw e
+                                } catch (_: Exception) {
+                                    retries--
+                                    if (retries > 0) delay(500)
                                 }
-                            } catch (_: Exception) {
-                                retries--
-                                if (retries > 0) delay(500)
                             }
-                        }
 
-                        if (!success) segFile.createNewFile()
+                            if (!success) continue  // skip failed segment, don't count it
 
-                        val done = completed.incrementAndGet()
-                        task.progress = ((done * 100) / total).coerceAtLeast(1)
-                        if (done % 50 == 0 || done == 1) {
-                            Log.e(TAG, "Progress: $done/$total (${task.progress}%)")
+                            val done = completed.incrementAndGet()
+                            task.progress = ((done * 100) / total).coerceIn(1, 100)
+                            if (done % 50 == 0 || done == 1) {
+                                Log.e(TAG, "Progress: $done/$total (${task.progress}%)")
+                            }
+                            onProgress(task)
                         }
-                        onProgress(task)
                     }
-                }
-            }.joinAll()
-        }
+                }.joinAll()
+            }
 
-        if (task.status != "downloading") return@withContext
+            if (task.status != "downloading") return@withContext
 
-        // Verify segments: count how many have actual content
-        var successCount = 0
-        for (i in 0 until total) {
-            val seg = File(tempDir, "${i.toString().padStart(6, '0')}.ts")
-            if (seg.exists() && seg.length() > 0) successCount++
-        }
-        Log.e(TAG, "Segments with content: $successCount/$total")
-        if (successCount == 0) {
-            task.status = "failed"
-            task.error = "所有分片下载失败，可能是视频源无法访问"
-            tempDir.deleteRecursively()
-            return@withContext
-        }
-        if (successCount < total * 0.8) {
-            task.status = "failed"
-            task.error = "分片下载不完整 (${successCount}/${total})，视频源可能不稳定"
-            tempDir.deleteRecursively()
-            return@withContext
-        }
+            // Verify segments: count how many have actual content
+            var successCount = 0
+            for (i in 0 until total) {
+                val seg = File(tempDir, "${i.toString().padStart(6, '0')}.ts")
+                if (seg.exists() && seg.length() > 0) successCount++
+            }
+            Log.e(TAG, "Segments with content: $successCount/$total (tempDir=$tempDir)")
+            if (successCount == 0) {
+                // Diagnostic: check if directory exists and list some files
+                val dirFiles = tempDir.listFiles()?.take(5)?.joinToString { "${it.name}(${it.length()}b)" } ?: "null"
+                Log.e(TAG, "Temp dir exists=${tempDir.exists()}, files sample: $dirFiles")
+                task.status = "failed"
+                task.error = "所有分片下载失败，可能是视频源无法访问"
+                return@withContext
+            }
+            if (successCount < total * 0.8) {
+                task.status = "failed"
+                task.error = "分片下载不完整 (${successCount}/${total})，视频源可能不稳定"
+                return@withContext
+            }
 
-        Log.e(TAG, "Merging $total segments...")
-        mergeSegments(tempDir, task, total)
-        tempDir.deleteRecursively()
-        Log.e(TAG, "Download done: ${task.title} ep${task.epIndex}")
+            Log.e(TAG, "Merging $total segments...")
+            mergeSegments(tempDir, task, total)
+            Log.e(TAG, "Download done: ${task.title} ep${task.epIndex}")
+        } finally {
+            // Always clean up temp dir, even on cancellation or failure
+            if (tempDir.exists()) {
+                tempDir.deleteRecursively()
+                Log.e(TAG, "Temp dir cleaned up: $tempDir")
+            }
+        }
     }
 
     class ParseError(msg: String) : Exception(msg)

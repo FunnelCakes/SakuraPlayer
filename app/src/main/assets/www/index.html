@@ -122,6 +122,9 @@
       <div class="me-item" onclick="window.Sakura.refreshDomain()">
         <span>🔄 刷新站点域名</span><span class="me-arrow">›</span>
       </div>
+      <div class="me-item" onclick="showDevLog()">
+        <span>📋 开发日志</span><span class="me-arrow">›</span>
+      </div>
       <div class="me-item" onclick="showAbout()">
         <span>ℹ 关于</span><span class="me-arrow">›</span>
       </div>
@@ -219,6 +222,34 @@
     </div>
   </div>
 
+
+  <!-- ===== DEV LOG PAGE (overlay) ===== -->
+  <div id="view-devlog" class="view overlay">
+    <header class="top-bar">
+      <button class="top-btn" onclick="closeDevLog()">←</button>
+      <span class="top-title">开发日志</span>
+      <span class="top-spacer"></span>
+    </header>
+    <div style="padding:16px 20px;line-height:2;color:#ccc;font-size:13px;overflow-y:auto;height:calc(100% - 48px)">
+      <p style="color:#FB7299;font-weight:bold;margin:12px 0 4px">2026-07</p>
+      <p>· 接入 GSYVideoPlayer，统一半屏/全屏播放</p>
+      <p>· 多 CDN 竞速下载，自适应采样算法</p>
+      <p>· 流媒体 CDN 竞速，先到先得</p>
+      <p>· 修复进度条超 100%、断点续传重复计数</p>
+      <p>· 封面下载前置，创建任务即存</p>
+      <p>· 全半屏进度与播放状态自动同步</p>
+      <p>· 全屏自动横屏、手势恢复</p>
+      <p>· 下载路径封面匹配算法优化</p>
+      <p>· 移动网络静默下载</p>
+      <p style="color:#FB7299;font-weight:bold;margin:16px 0 4px">2026-06</p>
+      <p>· 项目初始化，WebView + ExoPlayer</p>
+      <p>· 樱花动漫 AppleCMS 爬虫</p>
+      <p>· m3u8 TS 8线程并行下载 + AES-128</p>
+      <p>· CDN 三级探测(TLS1.2/1.3/HTTP)</p>
+      <p>· 本地文件浏览器 + Room DB</p>
+      <p>· 追番系统 + 更新检查</p>
+    </div>
+  </div>
 </div>
 
 <!-- Toast -->

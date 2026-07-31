@@ -79,4 +79,7 @@ dependencies {
     // GSYVideoPlayer
     implementation("io.github.carguo:gsyvideoplayer:11.1.0")
     implementation("io.github.carguo:gsyvideoplayer-exo2:11.1.0")
+    // Test
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.jetbrains.kotlin:kotlin-test:2.0.0")
 }

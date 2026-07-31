@@ -53,15 +53,26 @@ object DownloadManager {
         m3u8Url: String, saveDir: String, coverUrl: String = ""
     ): String {
         val id = "${videoId}_$epIndex"
-        if (tasks.containsKey(id)) return id
-
-        // Clean up leftover temp files from a previous failed/cancelled download
-        val tempDir = File(saveDir, ".temp_${videoId}_$epIndex")
-        if (tempDir.exists()) {
-            tempDir.deleteRecursively()
-            Log.e(TAG, "Cleaned up leftover temp dir for $id")
+        // Clean up ALL leftover temp files (any .temp_* dir in save dir)
+        val saveDirFile = File(saveDir)
+        if (saveDirFile.isDirectory) {
+            val tempDirs = saveDirFile.listFiles()?.filter {
+                it.isDirectory && it.name.startsWith(".temp_")
+            }
+            if (tempDirs != null) {
+                tempDirs.forEach { dir ->
+                    if (dir.deleteRecursively()) {
+                        Log.e(TAG, "Pre-download cleanup: removed ${dir.name}")
+                    } else {
+                        Log.e(TAG, "Pre-download cleanup: FAILED to remove ${dir.name}")
+                    }
+                }
+            } else {
+                Log.e(TAG, "Pre-download cleanup: listFiles() returned null for $saveDir")
+            }
         }
 
+        if (tasks.containsKey(id)) return id
         val task = DownloadTask(
             id = id, videoId = videoId, title = title,
             epIndex = epIndex, epName = epName,
@@ -208,6 +219,19 @@ object DownloadManager {
             task.error = e.message ?: "下载失败"
             Log.e(TAG, "Download failed: ${task.title}", e)
         } finally {
+            // Catch-all: remove any leftover temp dirs in the save directory
+            try {
+                val prefix = ".temp_${task.videoId}_${task.epIndex}"
+                File(task.saveDir).listFiles()?.filter {
+                    it.isDirectory && it.name.startsWith(prefix)
+                }?.forEach {
+                    if (it.deleteRecursively()) {
+                        Log.e(TAG, "Post-download cleanup: removed ${it.name}")
+                    } else {
+                        Log.e(TAG, "Post-download cleanup: FAILED to remove ${it.name}")
+                    }
+                }
+            } catch (_: Exception) {}
             notifyCallback(task)
             if (task.status == "completed") {
                 delay(2000)
@@ -277,17 +301,26 @@ object DownloadManager {
         val winnerEntry = cdnUrls.find { it.second == winner }!!
         Log.e(TAG, "Race winner: sid=$winner (${cdnProgress[winner]} bytes), killing ${numCdns - 1} losers")
 
-        // Cancel losing CDNs
+        // Cancel losing CDNs and wait for them to fully stop
         raceJobs.forEach { it.cancel() }
-        delay(500) // let cancellations propagate
+        raceJobs.forEach { it.join() }
 
-        // Clean up loser temp dirs
+        // Clean up loser temp dirs with retry for stubborn file handles
         for ((_, sid) in cdnUrls) {
             if (sid != winner) {
                 val loserTempDir = File(task.saveDir, ".temp_${task.videoId}_${task.epIndex}_sid$sid")
-                if (loserTempDir.exists()) {
-                    loserTempDir.deleteRecursively()
+                var deleted = false
+                repeat(3) {
+                    if (!loserTempDir.exists() || loserTempDir.deleteRecursively()) {
+                        deleted = true
+                        return@repeat
+                    }
+                    delay(200)
+                }
+                if (deleted) {
                     Log.e(TAG, "Cleaned up loser temp dir sid=$sid")
+                } else {
+                    Log.e(TAG, "FAILED to clean up loser temp dir sid=$sid — may be orphaned")
                 }
             }
         }
@@ -296,7 +329,17 @@ object DownloadManager {
         val winnerTempDir = File(task.saveDir, ".temp_${task.videoId}_${task.epIndex}_sid$winner")
         val standardTempDir = File(task.saveDir, ".temp_${task.videoId}_${task.epIndex}")
         if (winnerTempDir.exists() && !standardTempDir.exists()) {
-            winnerTempDir.renameTo(standardTempDir)
+            val renamed = winnerTempDir.renameTo(standardTempDir)
+            if (!renamed) {
+                Log.e(TAG, "Failed to rename winner temp dir — will copy instead")
+                try {
+                    winnerTempDir.copyRecursively(standardTempDir, overwrite = true)
+                    winnerTempDir.deleteRecursively()
+                    Log.e(TAG, "Winner temp dir copied successfully")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to copy winner temp dir — orphaned", e)
+                }
+            }
         }
 
         // Phase 2: Winner continues with full thread pool (resumes from downloaded segments)
