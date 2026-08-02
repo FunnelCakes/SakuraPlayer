@@ -109,6 +109,16 @@ object DownloadManager {
         }
     }
 
+    fun retry(id: String) {
+        tasks[id]?.let { task ->
+            task.status = "queued"
+            task.error = ""
+            task.progress = 0
+            task.job?.cancel()
+            task.job = scope.launch(Dispatchers.IO) { startDownload(task) }
+        }
+    }
+
     fun cancel(id: String) {
         tasks[id]?.let { task ->
             task.job?.cancel()

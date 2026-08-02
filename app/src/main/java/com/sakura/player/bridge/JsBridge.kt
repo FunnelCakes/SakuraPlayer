@@ -526,6 +526,7 @@ class JsBridge(private val ctx: Context) {
     fun pauseDownload(id: String) = DownloadManager.pause(id)
     fun resumeDownload(id: String) = DownloadManager.resume(id)
     fun cancelDownload(id: String) = DownloadManager.cancel(id)
+    fun retryDownload(id: String) = DownloadManager.retry(id)
 
     private fun taskToJson(t: DownloadTask): JSONObject = JSONObject().apply {
         put("id", t.id)

@@ -358,7 +358,7 @@ function renderDownloadList(tasks) {
           <div class="dl-info"><span>${t.progress||0}%</span><span>${t.speed||''} ${t.eta||''}</span></div>
           ${t.error ? `<div style="color:#FF4D4F;font-size:11px;margin-top:4px">${escHtml(t.error)}</div>` : ''}
           ${t.status !== 'completed' ? `<div class="dl-actions">
-            ${t.status === 'paused' ? `<button onclick="window.Sakura.resumeDownload('${t.id}')">恢复</button>` : `<button onclick="window.Sakura.pauseDownload('${t.id}')">暂停</button>`}
+            ${t.status === 'failed' ? `<button onclick="window.Sakura.retryDownload('${t.id}')">重新下载</button>` : (t.status === 'paused' ? `<button onclick="window.Sakura.resumeDownload('${t.id}')">恢复</button>` : `<button onclick="window.Sakura.pauseDownload('${t.id}')">暂停</button>`)}
             <button onclick="window.Sakura.cancelDownload('${t.id}')">取消</button>
           </div>` : ''}
         </div>`;

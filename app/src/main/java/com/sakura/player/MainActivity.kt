@@ -53,6 +53,11 @@ class MainActivity : AppCompatActivity() {
     // GSYVideoPlayer for inline (half-screen) playback
     private lateinit var gsyPlayer: StandardGSYVideoPlayer
 
+    // Whether the inline player was playing (vs. user-paused) before the app went to
+    // background. Used in onResume() to restore the EXACT state: paused stays paused,
+    // playing resumes (with position restored via onVideoResume()).
+    private var wasPlayingBeforeBackground = true
+
     // SAF directory picker for custom download path
     private val safPickerLauncher = registerForActivityResult(
         ActivityResultContracts.OpenDocumentTree()
@@ -221,6 +226,11 @@ class MainActivity : AppCompatActivity() {
             // Hide title/back button for inline mode
             backButton.visibility = View.GONE
             titleTextView.visibility = View.GONE
+            // Prevent GSY's audio-focus-loss handler from calling releaseAllVideos()
+            // (which wipes mCurrentPosition and releases the player) when another app
+            // steals audio focus while this app is backgrounded. Instead GSY takes the
+            // safe branch and pauses via listener().onVideoPause(), preserving position.
+            setReleaseWhenLossAudio(false)
         }
 
         // Disable mobile data warning dialog in GSYVideoPlayer
@@ -623,6 +633,7 @@ class MainActivity : AppCompatActivity() {
         @JavascriptInterface fun pauseDownload(id: String) { runOnUiThread { bridge.pauseDownload(id) } }
         @JavascriptInterface fun resumeDownload(id: String) { runOnUiThread { bridge.resumeDownload(id) } }
         @JavascriptInterface fun cancelDownload(id: String) { runOnUiThread { bridge.cancelDownload(id) } }
+        @JavascriptInterface fun retryDownload(id: String) { runOnUiThread { bridge.retryDownload(id) } }
         @JavascriptInterface fun addFollow(videoId: Long, title: String, coverUrl: String, totalEps: Int) {
             runOnUiThread { bridge.addFollow(videoId, title, coverUrl, totalEps) }
         }
@@ -726,7 +737,12 @@ class MainActivity : AppCompatActivity() {
         // Fullscreen entry/exit is handled natively by startWindowFullscreen /
         // clearFullscreenLayout — state is preserved in GSYVideoManager automatically.
         if (::gsyPlayer.isInitialized && gsyPlayer.visibility == View.VISIBLE) {
-            gsyPlayer.onVideoResume()
+            gsyPlayer.onVideoResume()  // restores saved position and resumes playback
+            // Re-pause if the user had manually paused before backgrounding, so the
+            // EXACT state is restored: paused stays paused, playing resumes.
+            if (!wasPlayingBeforeBackground) {
+                gsyPlayer.postDelayed({ gsyPlayer.onVideoPause() }, 100)
+            }
         }
 
         val dlDir = File(SettingsPrefs.downloadPath)
@@ -736,6 +752,27 @@ class MainActivity : AppCompatActivity() {
                 Log.e("SakuraMain", "Download dir created on resume: ${dlDir.absolutePath}")
                 evalJs("if(window.onPathChanged)window.onPathChanged('${dlDir.absolutePath}')")
             }
+        }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        // Pause the inline player and save its position (GSY's onVideoPause() stores
+        // mCurrentPosition). Without this the video keeps playing in the background and
+        // the position is never saved, so onResume's onVideoResume() is a no-op.
+        if (::gsyPlayer.isInitialized) {
+            wasPlayingBeforeBackground = gsyPlayer.isInPlayingState
+            gsyPlayer.onVideoPause()
+        }
+    }
+
+    override fun onStop() {
+        super.onStop()
+        // Ensure the player is paused when the app is fully backgrounded. This is a
+        // no-op if onPause already paused it (isInPlayingState is false), but covers
+        // paths where the playback state changed between onPause and onStop.
+        if (::gsyPlayer.isInitialized) {
+            gsyPlayer.onVideoPause()
         }
     }
 
