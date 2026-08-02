@@ -114,14 +114,19 @@ object DownloadRecordManager {
                         ))
                         inserted++
                     }
-                } else if (existing.videoId != videoId) {
-                    // Update record if videoId changed (e.g. old hash-based -> real from search)
-                    dao.upsertDownloadRecord(existing.copy(
-                        videoId = videoId,
-                        title = title,
-                        updatedAt = System.currentTimeMillis()
-                    ))
-                    inserted++
+                } else if (existing.videoId != videoId && existing.sourceUrl.isBlank()) {
+                    // Upgrade hash-based videoId to the fresh search result, BUT only when the record
+                    // has no authoritative stored play page URL and the current id looks like a hash.
+                    // Never clobber a record that already carries a real videoId + sourceUrl.
+                    val currentLooksLikeHash = existing.videoId == 0L || existing.videoId !in 1L..99999999L
+                    if (currentLooksLikeHash) {
+                        dao.upsertDownloadRecord(existing.copy(
+                            videoId = videoId,
+                            title = title,
+                            updatedAt = System.currentTimeMillis()
+                        ))
+                        inserted++
+                    }
                 }
             }
         }

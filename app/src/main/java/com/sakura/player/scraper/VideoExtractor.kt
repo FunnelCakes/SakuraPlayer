@@ -13,11 +13,20 @@ data class VideoUrl(
 
 object VideoExtractor {
 
-    suspend fun extractFromPlayPage(domain: String, videoId: Long, ep: Int, sid: Int = 1): VideoUrl = withContext(Dispatchers.IO) {
+    /** Extract m3u8 from a play page URL built from domain/videoId/sid/ep (used by online flow). */
+    suspend fun extractFromPlayPage(domain: String, videoId: Long, ep: Int, sid: Int = 1): VideoUrl {
+        val url = "$domain/index.php/vod/play/id/$videoId/sid/$sid/nid/$ep.html"
+        return extractFromPlayPageUrl(url)
+    }
+
+    /** Extract m3u8 from a full play page URL, e.g. a stored DownloadRecordEntity.sourceUrl. */
+    suspend fun extractFromPlayPageUrl(playPageUrl: String): VideoUrl = withContext(Dispatchers.IO) {
         try {
-            val url = "$domain/index.php/vod/play/id/$videoId/sid/$sid/nid/$ep.html"
-            val reqBuilder = Request.Builder().url(url).get()
-            HttpClient.browserHeaders(domain + "/").forEach { (k, v) -> reqBuilder.header(k, v) }
+            val reqBuilder = Request.Builder().url(playPageUrl).get()
+            // Derive referer from the stored URL itself so a stale mirror still gets correct headers.
+            val origin = playPageUrl.substringBefore("/index.php", playPageUrl)
+            val referer = if (origin.endsWith("/")) origin else "$origin/"
+            HttpClient.browserHeaders(referer).forEach { (k, v) -> reqBuilder.header(k, v) }
             val html = HttpClient.client.newCall(reqBuilder.build()).execute().use { it.body?.string() ?: return@withContext VideoUrl("") }
 
             // Parse var player_aaaa={...}

@@ -626,6 +626,13 @@ class JsBridge(private val ctx: Context) {
         return dirName.hashCode().toLong()
     }
 
+    /** Extract the real website videoId from a stored play page URL (e.g. .../vod/play/id/76284/sid/1/nid/3.html) */
+    private fun extractVideoIdFromUrl(url: String): Long? {
+        if (url.isBlank()) return null
+        val match = Regex("""/vod/play/id/(\d+)""").find(url)
+        return match?.groupValues?.get(1)?.toLongOrNull()
+    }
+
     fun redownloadLocal(pathsJson: String, callback: String) {
         scope.launch(Dispatchers.IO) {
             val arr = JSONArray(pathsJson)
@@ -643,18 +650,18 @@ class JsBridge(private val ctx: Context) {
             }
 
             for (record in allRecords) {
-                // Resolve real videoId from website search (record may have hash from syncMissingRecords)
-                // Use saved source URL if available, otherwise search for real videoId
-                // Prefer original videoId to preserve existing covers; only re-search if it looks like a hash
-                // Use original videoId (preserves covers); only re-search if it is clearly a hash
-                val realVideoId = if (record.videoId in 1L..99999999L && record.videoId != 0L) {
-                    record.videoId
-                } else if (record.sourceUrl.isNotBlank()) {
-                    record.videoId
-                } else {
-                    searchVideoIdForDir(record.title)
+                // Resolve the real website videoId. Priority:
+                //   1. The stored play page URL (sourceUrl) — authoritative, carries the real ID
+                //   2. The stored videoId when it is a plausible real website ID
+                //   3. A fresh website search (records synced from disk have no sourceUrl)
+                val videoIdFromUrl = record.sourceUrl.let { extractVideoIdFromUrl(it) }
+                val realVideoId = when {
+                    videoIdFromUrl != null -> videoIdFromUrl
+                    record.videoId in 1L..99999999L && record.videoId != 0L -> record.videoId
+                    else -> searchVideoIdForDir(record.title)
                 }
-                Log.e(TAG, "redownload: ${record.title} -> videoId=$realVideoId (was ${record.videoId})")
+                Log.e(TAG, "redownload: ${record.title} -> videoId=$realVideoId (was ${record.videoId})" +
+                        (if (videoIdFromUrl != null) ", from sourceUrl=${record.sourceUrl}" else ""))
                 // Delete DB record first so dedup check doesn't block re-download
                 DownloadRecordManager.deleteRecord(record.localPath)
                 // Delete old file (best-effort)
@@ -667,7 +674,8 @@ class JsBridge(private val ctx: Context) {
                     epName = "第${record.epIndex}集",
                     m3u8Url = "",
                     saveDir = dir,
-                    coverUrl = record.coverUrl
+                    coverUrl = record.coverUrl,
+                    playPageUrl = record.sourceUrl
                 )
             }
 

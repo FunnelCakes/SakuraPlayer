@@ -19,6 +19,7 @@ data class DownloadTask(
     val m3u8Url: String = "",
     val saveDir: String,
     val coverUrl: String = "",
+    val playPageUrl: String = "", // full play page URL (e.g. from stored record) used for extraction
     var status: String = "queued", // queued, downloading, paused, completed, failed
     var progress: Int = 0,
     var totalSize: Long = 0,
@@ -50,7 +51,8 @@ object DownloadManager {
 
     fun addSingle(
         videoId: Long, title: String, epIndex: Int, epName: String,
-        m3u8Url: String, saveDir: String, coverUrl: String = ""
+        m3u8Url: String, saveDir: String, coverUrl: String = "",
+        playPageUrl: String = ""
     ): String {
         val id = "${videoId}_$epIndex"
         // Clean up ALL leftover temp files (any .temp_* dir in save dir)
@@ -76,7 +78,8 @@ object DownloadManager {
         val task = DownloadTask(
             id = id, videoId = videoId, title = title,
             epIndex = epIndex, epName = epName,
-            m3u8Url = m3u8Url, saveDir = saveDir, coverUrl = coverUrl
+            m3u8Url = m3u8Url, saveDir = saveDir, coverUrl = coverUrl,
+            playPageUrl = playPageUrl
         )
         tasks[id] = task
         task.job = scope.launch(Dispatchers.IO) { startDownload(task) }
@@ -125,6 +128,10 @@ object DownloadManager {
         if (task.status == "completed" || task.status == "cancelled") return
         Log.e(TAG, "startDownload: waiting for slot... ${task.title} ep${task.epIndex}")
 
+        // Track the exact play page URL that produced a working m3u8, so the completed
+        // DownloadRecordEntity can persist it as sourceUrl for future re-downloads.
+        var playPageUrlUsed = task.playPageUrl
+
         try {
             semaphore.withPermit {
                 // Dedup: skip if already downloaded
@@ -156,33 +163,56 @@ object DownloadManager {
                 Log.e(TAG, "Slot acquired, domain=$domain")
 
                 if (task.m3u8Url.isNotEmpty()) {
-                    // Pre-provided URL (e.g., redownload) — single CDN with all threads
-                    val playPageUrl = "$domain/index.php/vod/play/id/${task.videoId}/sid/1/nid/${task.epIndex}.html"
-                    TsDownloader.download(task.m3u8Url, task, playPageUrl, { notifyCallback(it) },
+                    // Pre-provided URL (e.g., online single download) — single CDN with all threads
+                    playPageUrlUsed = task.playPageUrl.ifEmpty {
+                        "$domain/index.php/vod/play/id/${task.videoId}/sid/1/nid/${task.epIndex}.html"
+                    }
+                    TsDownloader.download(task.m3u8Url, task, playPageUrlUsed, { notifyCallback(it) },
                         threadCount = TsDownloader.CONCURRENT_THREADS)
                 } else {
-                    // Extract m3u8 URLs from ALL available sids
+                    // Extract m3u8 URLs. Prefer the stored play page URL (re-download) which carries
+                    // the exact sid that worked before; fall back to probing sids 1..4 (batch download).
                     val allCdnUrls = mutableListOf<Pair<String, Int>>()
-                    for (sid in 1..4) {
+
+                    if (task.playPageUrl.isNotEmpty()) {
                         try {
-                            val vu = VideoExtractor.extractFromPlayPage(domain, task.videoId, task.epIndex, sid)
+                            val vu = VideoExtractor.extractFromPlayPageUrl(task.playPageUrl)
                             if (vu.m3u8Url.isNotEmpty()) {
+                                val sid = extractSidFromUrl(task.playPageUrl)
                                 allCdnUrls.add(vu.m3u8Url to sid)
-                                Log.e(TAG, "CDN sid=$sid: ${vu.m3u8Url.take(60)}...")
+                                playPageUrlUsed = task.playPageUrl
+                                Log.e(TAG, "CDN from stored play page (sid=$sid): ${vu.m3u8Url.take(60)}...")
                             }
-                        } catch (_: Exception) { Log.e(TAG, "CDN sid=$sid unavailable") }
+                        } catch (_: Exception) { Log.e(TAG, "CDN from stored play page unavailable") }
+                    }
+
+                    if (allCdnUrls.isEmpty()) {
+                        for (sid in 1..4) {
+                            try {
+                                val vu = VideoExtractor.extractFromPlayPage(domain, task.videoId, task.epIndex, sid)
+                                if (vu.m3u8Url.isNotEmpty()) {
+                                    allCdnUrls.add(vu.m3u8Url to sid)
+                                    Log.e(TAG, "CDN sid=$sid: ${vu.m3u8Url.take(60)}...")
+                                }
+                            } catch (_: Exception) { Log.e(TAG, "CDN sid=$sid unavailable") }
+                        }
                     }
 
                     if (allCdnUrls.isEmpty()) throw Exception("无法获取视频地址 — 所有源均不可用")
 
                     if (allCdnUrls.size == 1) {
                         val (url, sid) = allCdnUrls[0]
-                        val playPageUrl = "$domain/index.php/vod/play/id/${task.videoId}/sid/$sid/nid/${task.epIndex}.html"
-                        TsDownloader.download(url, task, playPageUrl, { notifyCallback(it) },
+                        // Keep the stored play page URL if it produced the m3u8; otherwise rebuild
+                        // from the (real) videoId so the completed record persists a working URL.
+                        if (playPageUrlUsed.isBlank()) {
+                            playPageUrlUsed = "$domain/index.php/vod/play/id/${task.videoId}/sid/$sid/nid/${task.epIndex}.html"
+                        }
+                        TsDownloader.download(url, task, playPageUrlUsed, { notifyCallback(it) },
                             threadCount = TsDownloader.CONCURRENT_THREADS)
                     } else {
                         // Multi-CDN: race all, eliminate slow ones, converge on fastest
-                        raceAndConverge(task, allCdnUrls)
+                        val winnerSid = raceAndConverge(task, allCdnUrls)
+                        playPageUrlUsed = "$domain/index.php/vod/play/id/${task.videoId}/sid/$winnerSid/nid/${task.epIndex}.html"
                     }
                 }
 
@@ -198,7 +228,8 @@ object DownloadManager {
                                 videoId = task.videoId,
                                 title = task.title,
                                 epIndex = task.epIndex,
-                                coverUrl = task.coverUrl
+                                coverUrl = task.coverUrl,
+                                sourceUrl = playPageUrlUsed
                             )
                         )
                         if (task.coverUrl.isNotBlank()) {
@@ -253,7 +284,7 @@ object DownloadManager {
     private suspend fun raceAndConverge(
         task: DownloadTask,
         cdnUrls: List<Pair<String, Int>>
-    ) = withContext(Dispatchers.IO) {
+    ): Int = withContext(Dispatchers.IO) {
         val numCdns = cdnUrls.size
         val threadsPerCdn = maxOf(4, TsDownloader.CONCURRENT_THREADS / numCdns)
         Log.e(TAG, "Multi-CDN race: $numCdns CDNs, $threadsPerCdn threads each, sample ${RACE_SAMPLE_SECONDS}s")
@@ -385,12 +416,19 @@ object DownloadManager {
         val playPageUrl = "$domain/index.php/vod/play/id/${task.videoId}/sid/$winner/nid/${task.epIndex}.html"
         TsDownloader.download(url, task, playPageUrl, { notifyCallback(it) },
             threadCount = TsDownloader.CONCURRENT_THREADS)
+        return@withContext winner
     }
 
     private fun notifyCallback(task: DownloadTask) {
         callback?.let { cb ->
             android.os.Handler(android.os.Looper.getMainLooper()).post { cb(task) }
         }
+    }
+
+    /** Pull the sid out of a stored play page URL like .../vod/play/id/123/sid/2/nid/3.html */
+    fun extractSidFromUrl(url: String): Int {
+        val match = Regex("""/sid/(\d+)/""").find(url)
+        return match?.groupValues?.get(1)?.toIntOrNull() ?: 1
     }
 }
 

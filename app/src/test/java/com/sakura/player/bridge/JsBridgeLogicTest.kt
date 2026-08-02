@@ -55,6 +55,70 @@ class JsBridgeLogicTest {
     }
 
     @Test
+    fun `extractVideoIdFromUrl parses real ID from stored play page URL`() {
+        // Mirrors JsBridge.extractVideoIdFromUrl regex
+        fun extract(url: String): Long? {
+            if (url.isBlank()) return null
+            return Regex("""/vod/play/id/(\d+)""").find(url)?.groupValues?.get(1)?.toLongOrNull()
+        }
+
+        assertEquals(76284L, extract("https://yinghua14.com/index.php/vod/play/id/76284/sid/2/nid/3.html"))
+        assertEquals(12345L, extract("http://mirror.example/index.php/vod/play/id/12345/sid/1/nid/12.html"))
+        assertNull(extract(""))
+        assertNull(extract("https://example.com/vod/detail/id/76284.html"))
+        assertNull(extract("not-a-url"))
+    }
+
+    @Test
+    fun `redownload resolution prefers real videoId from sourceUrl over stored hash`() {
+        // Mirrors JsBridge.redownloadLocal when-branch priority
+        fun extractVideoIdFromUrl(url: String): Long? {
+            if (url.isBlank()) return null
+            return Regex("""/vod/play/id/(\d+)""").find(url)?.groupValues?.get(1)?.toLongOrNull()
+        }
+        fun resolve(sourceUrl: String, storedVideoId: Long): Pair<Long, Boolean> {
+            val videoIdFromUrl = extractVideoIdFromUrl(sourceUrl)
+            val realVideoId = when {
+                videoIdFromUrl != null -> videoIdFromUrl
+                storedVideoId in 1L..99999999L && storedVideoId != 0L -> storedVideoId
+                else -> -1L // searchVideoIdForDir fallback
+            }
+            return realVideoId to (videoIdFromUrl != null)
+        }
+
+        // sourceUrl carries the real ID even when stored videoId is a hash -> use sourceUrl
+        val (id1, fromUrl1) = resolve(
+            "https://yinghua14.com/index.php/vod/play/id/76284/sid/1/nid/3.html",
+            724765640L // hash for "尼古喵喵"
+        )
+        assertEquals(76284L, id1)
+        assertTrue(fromUrl1)
+
+        // No sourceUrl, stored videoId is a plausible real ID -> keep it
+        val (id2, fromUrl2) = resolve("", 76284L)
+        assertEquals(76284L, id2)
+        assertFalse(fromUrl2)
+
+        // No sourceUrl, stored videoId looks like a hash (out of range) -> fall to search
+        val (id3, fromUrl3) = resolve("", 724765640L)
+        assertEquals(-1L, id3) // would be searchVideoIdForDir
+        assertFalse(fromUrl3)
+
+        // No sourceUrl, stored videoId is 0 -> fall to search
+        val (id4, _) = resolve("", 0L)
+        assertEquals(-1L, id4)
+    }
+
+    @Test
+    fun `hash fallback value is not a plausible real videoId for Chinese titles`() {
+        // Guards the redownload heuristic: hash values must NOT look like real website IDs.
+        // If this ever fails, the in-range heuristic is no longer safe and sourceUrl becomes mandatory.
+        val dirName = "尼古喵喵"
+        val hash = dirName.hashCode().toLong()
+        assertFalse("hash=$hash should be out of plausible website-id range", hash in 1L..99999999L)
+    }
+
+    @Test
     fun `episode index extraction from filename`() {
         val patterns = listOf(
             Regex("""第\s*(\d+)"""),
