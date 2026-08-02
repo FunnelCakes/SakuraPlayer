@@ -242,8 +242,13 @@ object DownloadManager {
 
     /**
      * Multi-CDN race: start downloading from all CDNs in parallel with equal threads,
-     * sample for [RACE_SAMPLE_SECONDS] seconds, then converge all threads onto the fastest CDN.
-     * The losing CDNs' temp files are cleaned up; the winner resumes with full thread pool.
+     * sample for [RACE_SAMPLE_SECONDS] seconds to determine the fastest CDN.
+     *
+     * The race is ONLY used to pick the winning CDN. All race temp dirs are deleted
+     * afterwards and Phase 2 performs a fresh download from the winner with the full
+     * thread pool. Partial segments from different CDNs are NOT reused because they
+     * may use incompatible encoding parameters, AES keys, or segment structures —
+     * merging them would corrupt the output file.
      */
     private suspend fun raceAndConverge(
         task: DownloadTask,
@@ -338,7 +343,7 @@ object DownloadManager {
         val winnerEntry = cdnUrls.find { it.second == winner }!!
         Log.e(TAG, "Race winner: sid=$winner (${cdnProgress[winner]} bytes), killing ${numCdns - 1} losers")
 
-        // Cancel losing CDNs and wait for them to stop (with timeout)
+        // Cancel all race jobs and wait for them to stop (with timeout)
         raceJobs.forEach { it.cancel() }
         try {
             withTimeout(3000) {
@@ -348,47 +353,34 @@ object DownloadManager {
             Log.e(TAG, "Race jobs did not cancel within timeout, proceeding anyway")
         }
 
-        // Clean up loser temp dirs with retry for stubborn file handles
+        // Clean up ALL race temp dirs — do NOT reuse partial segments across CDNs.
+        // Different CDNs may use different encoding parameters (resolution, bitrate,
+        // frame rate), AES keys, or segment structures, so mixing their segments
+        // corrupts the final MP4 (plays only a few seconds despite large size).
         for ((_, sid) in cdnUrls) {
-            if (sid != winner) {
-                val loserTempDir = File(task.saveDir, ".temp_${task.videoId}_${task.epIndex}_sid$sid")
-                var deleted = false
-                repeat(3) {
-                    if (!loserTempDir.exists() || loserTempDir.deleteRecursively()) {
-                        deleted = true
-                        return@repeat
-                    }
-                    delay(200)
-                }
-                if (deleted) {
-                    Log.e(TAG, "Cleaned up loser temp dir sid=$sid")
-                } else {
-                    Log.e(TAG, "FAILED to clean up loser temp dir sid=$sid — may be orphaned")
-                }
+            val dir = File(task.saveDir, ".temp_${task.videoId}_${task.epIndex}_sid$sid")
+            if (dir.exists()) {
+                if (dir.deleteRecursively()) Log.e(TAG, "Race cleanup: removed sid=$sid")
+                else Log.e(TAG, "Race cleanup: FAILED sid=$sid")
             }
         }
 
-        // Rename winner's temp dir to standard name so final merge picks it up
-        val winnerTempDir = File(task.saveDir, ".temp_${task.videoId}_${task.epIndex}_sid$winner")
+        // Delete the standard temp dir too so Phase 2 starts 100% fresh
+        // (any leftover partial segments there would otherwise be resumed).
         val standardTempDir = File(task.saveDir, ".temp_${task.videoId}_${task.epIndex}")
-        if (winnerTempDir.exists() && !standardTempDir.exists()) {
-            val renamed = winnerTempDir.renameTo(standardTempDir)
-            if (!renamed) {
-                Log.e(TAG, "Failed to rename winner temp dir — will copy instead")
-                try {
-                    winnerTempDir.copyRecursively(standardTempDir, overwrite = true)
-                    winnerTempDir.deleteRecursively()
-                    Log.e(TAG, "Winner temp dir copied successfully")
-                } catch (e: Exception) {
-                    Log.e(TAG, "Failed to copy winner temp dir — orphaned", e)
-                }
+        if (standardTempDir.exists()) {
+            if (standardTempDir.deleteRecursively()) {
+                Log.e(TAG, "Race cleanup: removed standard temp dir")
+            } else {
+                Log.e(TAG, "Race cleanup: FAILED to remove standard temp dir")
             }
         }
 
-        // Phase 2: Winner continues with full thread pool (resumes from downloaded segments)
-        task.status = "downloading"
+        // Phase 2: fresh download from winning CDN (no partial reuse)
         task.progress = 0
-        Log.e(TAG, "Phase 2: sid=$winner with ${TsDownloader.CONCURRENT_THREADS} threads")
+        notifyCallback(task)
+        task.status = "downloading"
+        Log.e(TAG, "Phase 2: sid=$winner fresh download with ${TsDownloader.CONCURRENT_THREADS} threads")
         val (url, _) = winnerEntry
         val playPageUrl = "$domain/index.php/vod/play/id/${task.videoId}/sid/$winner/nid/${task.epIndex}.html"
         TsDownloader.download(url, task, playPageUrl, { notifyCallback(it) },
