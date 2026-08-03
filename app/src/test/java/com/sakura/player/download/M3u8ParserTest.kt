@@ -159,4 +159,105 @@ class M3u8ParserTest {
         assertNotNull(info.iv)
         assertEquals(16, info.iv!!.size)
     }
+
+    // --- Structural fallback (no CUE/DATERANGE markers) ---
+    // Real yinghua14 mirror playlists inject ads from a wholly separate stream directory
+    // (/20260727/<adId>/10137kb/hls/) with short, irregular durations, bounded by
+    // #EXT-X-DISCONTINUITY. Content stays on the media playlist's own directory with
+    // uniform ~3.75s segments.
+
+    private val mediaUrl = "https://play.modujx11.com/20250716/gY1jhK5d/1026kb/hls/index.m3u8"
+    private val contentSeg = "https://bf.modujx11.com/20250716/gY1jhK5d/1026kb/hls/content.ts"
+    private val adSeg0 = "https://bf.modujx15.com/20260727/wRbpF6Qd/10137kb/hls/ad0.ts"
+    private val adSeg1 = "https://bf.modujx15.com/20260727/wRbpF6Qd/10137kb/hls/ad1.ts"
+
+    @Test
+    fun `discontinuity block on different content path with short durations is skipped`() {
+        val content = """
+            #EXTM3U
+            #EXTINF:3.753122,
+            $contentSeg
+            #EXT-X-DISCONTINUITY
+            #EXTINF:3.333,
+            $adSeg0
+            #EXTINF:1.667,
+            $adSeg1
+            #EXT-X-DISCONTINUITY
+            #EXTINF:3.753133,
+            $contentSeg
+        """.trimIndent()
+        val info = TsDownloader.parseM3u8Media(content, mediaUrl)
+        assertEquals(2, info.segments.size)
+        assertTrue(info.segments.all { it.contains("modujx11.com") })
+    }
+
+    @Test
+    fun `discontinuity block on different path with normal durations is kept`() {
+        val content = """
+            #EXTM3U
+            #EXTINF:3.753122,
+            $contentSeg
+            #EXT-X-DISCONTINUITY
+            #EXTINF:3.753133,
+            $adSeg0
+            #EXT-X-DISCONTINUITY
+            #EXTINF:3.753133,
+            $contentSeg
+        """.trimIndent()
+        val info = TsDownloader.parseM3u8Media(content, mediaUrl)
+        assertEquals(3, info.segments.size)
+    }
+
+    @Test
+    fun `playlist where no block matches media dir keeps every segment`() {
+        // Guard: if the media URL's directory matches nothing (nonstandard playlist URL),
+        // the heuristic must not drop every block.
+        val content = """
+            #EXTM3U
+            #EXTINF:1.667,
+            $adSeg0
+            #EXT-X-DISCONTINUITY
+            #EXTINF:1.667,
+            $adSeg1
+        """.trimIndent()
+        val info = TsDownloader.parseM3u8Media(content, mediaUrl)
+        assertEquals(2, info.segments.size)
+    }
+
+    @Test
+    fun `real yinghua ep8 playlist keeps 379 content segments and skips 27 ad segments`() {
+        // Faithful reproduction of the downloaded ep8 media playlist structure:
+        // 406 segments TOTAL; ad blocks occupy slots 24-32, 96-104, 397-405 (3x9 = 27 ads on
+        // modujx15), the remaining 379 slots are content on modujx11, ad blocks bounded by
+        // #EXT-X-DISCONTINUITY.
+        val sb = StringBuilder("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:0\n")
+        fun contentSeg(i: Int) = "https://bf.modujx11.com/20250716/gY1jhK5d/1026kb/hls/c$i.ts"
+        fun adSeg(i: Int) = "https://bf.modujx15.com/20260727/wRbpF6Qd/10137kb/hls/a$i.ts"
+        val adDurations = listOf(3.333, 1.667, 1.667, 2.933, 1.667, 1.667, 1.667, 1.667, 1.3)
+        val isAdSlot = Array(406) { false }
+        for (start in listOf(24, 96, 397)) for (j in 0 until 9) isAdSlot[start + j] = true
+        var contentIdx = 0
+        var adIdx = 0
+        var prevAd = false
+        for (i in 0 until 406) {
+            val isAd = isAdSlot[i]
+            if (isAd != prevAd) {
+                sb.append("#EXT-X-DISCONTINUITY\n")
+                prevAd = isAd
+            }
+            if (isAd) {
+                val j = adIdx % 9
+                sb.append("#EXTINF:${adDurations[j]},\n${adSeg(j)}\n")
+                adIdx++
+            } else {
+                sb.append("#EXTINF:3.753122,\n${contentSeg(contentIdx)}\n")
+                contentIdx++
+            }
+        }
+        sb.append("#EXT-X-ENDLIST\n")
+        val info = TsDownloader.parseM3u8Media(sb.toString(), mediaUrl)
+        assertEquals(379, info.segments.size)
+        assertEquals(0, info.segments.count { it.contains("modujx15.com") })
+        assertEquals(379, info.segments.count { it.contains("modujx11.com") })
+    }
 }

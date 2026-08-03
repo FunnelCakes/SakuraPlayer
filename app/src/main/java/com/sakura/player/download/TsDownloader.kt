@@ -326,25 +326,55 @@ object TsDownloader {
         }
     }
 
+    /** Structural fallback: a DISCONTINUITY block whose median duration is below this is
+     *  considered an ad (content on yinghua mirrors is uniformly ~3.75s; ads are ~1.3-3.3s). */
+    private const val AD_BLOCK_MAX_MEDIAN_DURATION = 3.0
+
+    private data class SegmentEntry(val url: String, val duration: Double?)
+
+    /** Path directory (up to the last '/') of an absolute segment URL, or null if unparseable. */
+    private fun segmentPathDir(segmentUrl: String): String? {
+        return try {
+            val path = java.net.URI(segmentUrl).path ?: return null
+            path.substringBeforeLast('/').takeIf { it.isNotBlank() && it != "/" }
+        } catch (_: Exception) { null }
+    }
+
     /**
      * Parse an HLS media playlist, skipping advertisement segments.
      *
-     * Ads are detected via standard HLS markers:
-     *  - #EXT-X-CUE-OUT / #EXT-X-CUE-IN (classic SCTE-35 splice markers)
-     *  - #EXT-X-DATERANGE with an ad/interstitial CLASS or SCTE35-OUT / SCTE35-IN
+     * Ads are detected two ways:
+     *  1. Standard HLS ad markers:
+     *     - #EXT-X-CUE-OUT / #EXT-X-CUE-IN (classic SCTE-35 splice markers)
+     *     - #EXT-X-DATERANGE with an ad/interstitial CLASS or SCTE35-OUT / SCTE35-IN
+     *  2. Structural fallback for CDNs that inject ads WITHOUT marker tags (confirmed on
+     *     yinghua14.com mirrors, where ad segments come from a wholly separate stream path,
+     *     e.g. /20260727/<adId>/10137kb/hls/, and have short, irregular durations). A
+     *     #EXT-X-DISCONTINUITY-bounded block is treated as an ad block when BOTH:
+     *       - none of its segment URLs share the media playlist's content directory, AND
+     *       - the block's median segment duration is below [AD_BLOCK_MAX_MEDIAN_DURATION].
+     *     The "at least one block matches the media directory" guard prevents a nonstandard
+     *     playlist URL from causing every block to be misclassified as an ad.
      *
-     * While inside an ad block, segment URIs are NOT collected so ads never get
-     * downloaded or merged into the final MP4. This is a pure function (no network
-     * or Android dependencies) so it can be unit tested on the JVM.
+     * While inside an ad block, segment URIs are NOT collected so ads never get downloaded
+     * or merged into the final MP4. This is a pure function (no network or Android
+     * dependencies) so it can be unit tested on the JVM.
      */
     internal fun parseM3u8Media(content: String, url: String): M3u8Info {
         val baseUrl = url.substringBeforeLast("/") + "/"
+        val mediaUri = try { java.net.URI(url) } catch (_: Exception) { null }
+        val contentDir = mediaUri?.path?.substringBeforeLast('/')?.takeIf { it.isNotBlank() && it != "/" }
+
         var keyUrl: String? = null
         var iv: ByteArray? = null
-        val segments = mutableListOf<String>()
-        val lines = content.lines()
+        var currentDuration: Double? = null
         var inAd = false
-        var adSegmentsSkipped = 0
+        var adSegmentsSkippedByMarker = 0
+
+        // Blocks are separated by #EXT-X-DISCONTINUITY; used by the structural fallback.
+        val blocks = mutableListOf<MutableList<SegmentEntry>>()
+        blocks.add(mutableListOf())
+        val lines = content.lines()
 
         for (line in lines) {
             val trimmed = line.trim()
@@ -358,6 +388,9 @@ object TsDownloader {
                             iv = ByteArray(16) { j -> hex.substring(j * 2, j * 2 + 2).toInt(16).toByte() }
                         }
                     }
+                }
+                trimmed.startsWith("#EXTINF") -> {
+                    currentDuration = Regex("#EXTINF:\\s*([\\d.]+)").find(trimmed)?.groupValues?.get(1)?.toDoubleOrNull()
                 }
                 trimmed.startsWith("#EXT-X-CUE-OUT") -> {
                     inAd = true
@@ -381,28 +414,62 @@ object TsDownloader {
                         }
                     }
                 }
+                trimmed.startsWith("#EXT-X-DISCONTINUITY") -> {
+                    blocks.add(mutableListOf())
+                }
                 trimmed.startsWith("#") -> {
                     // Ignore all other tags
                 }
                 trimmed.isNotBlank() -> {
                     if (inAd) {
-                        adSegmentsSkipped++
+                        adSegmentsSkippedByMarker++
+                        currentDuration = null
                         continue
                     }
                     val segUrl = when {
                         trimmed.startsWith("http") -> trimmed
                         trimmed.startsWith("/") -> {
-                            val uri = java.net.URI(url)
-                            "${uri.scheme}://${uri.host}$trimmed"
+                            val u = mediaUri
+                            if (u != null) "${u.scheme}://${u.host}$trimmed" else baseUrl + trimmed.trimStart('/')
                         }
                         else -> baseUrl + trimmed
                     }
-                    segments.add(segUrl)
+                    blocks.last().add(SegmentEntry(segUrl, currentDuration))
+                    currentDuration = null
                 }
             }
         }
-        if (adSegmentsSkipped > 0) {
-            Log.e(TAG, "Skipped $adSegmentsSkipped ad segment(s)")
+
+        // Structural fallback: drop DISCONTINUITY-bounded blocks that come from a different
+        // stream directory AND have abnormally short segments (the confirmed ad signature).
+        val contentDirMatches = blocks.count { block -> block.any { segmentPathDir(it.url) == contentDir } }
+        val segments = mutableListOf<String>()
+        var adSegmentsSkippedByBlock = 0
+        if (contentDir != null && contentDirMatches > 0) {
+            for (block in blocks) {
+                val noSegmentMatchesContent = block.none { segmentPathDir(it.url) == contentDir }
+                val medianDuration = block.mapNotNull { it.duration }.let { durs ->
+                    if (durs.isEmpty()) null else durs.sorted().let { s ->
+                        val mid = s.size / 2
+                        if (s.size % 2 == 0) (s[mid - 1] + s[mid]) / 2.0 else s[mid]
+                    }
+                }
+                if (noSegmentMatchesContent && medianDuration != null && medianDuration < AD_BLOCK_MAX_MEDIAN_DURATION) {
+                    adSegmentsSkippedByBlock += block.size
+                    Log.e(TAG, "Ad block skipped via content-path + duration heuristic (n=${block.size})")
+                } else {
+                    segments.addAll(block.map { it.url })
+                }
+            }
+        } else {
+            for (block in blocks) segments.addAll(block.map { it.url })
+        }
+
+        if (adSegmentsSkippedByMarker > 0) {
+            Log.e(TAG, "Skipped $adSegmentsSkippedByMarker ad segment(s) via CUE/DATERANGE markers")
+        }
+        if (adSegmentsSkippedByBlock > 0) {
+            Log.e(TAG, "Skipped $adSegmentsSkippedByBlock ad segment(s) via content-path/duration heuristic")
         }
         return M3u8Info(segments, keyUrl, iv)
     }
