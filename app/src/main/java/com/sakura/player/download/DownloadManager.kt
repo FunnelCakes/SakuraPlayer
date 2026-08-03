@@ -122,11 +122,14 @@ object DownloadManager {
     fun cancel(id: String) {
         tasks[id]?.let { task ->
             task.job?.cancel()
-            // Clean up partial files
+            // Clean up partial files and temp dirs (recursive for directories). The
+            // cancelled coroutine's finally sees status as "paused" (it catches
+            // CancellationException and marks paused), so the pause guard would skip
+            // cleanup — we do it here explicitly instead.
             val dir = File(task.saveDir)
             if (dir.exists()) {
                 dir.listFiles()?.filter { it.name.contains("${task.videoId}_${task.epIndex}") }
-                    ?.forEach { it.delete() }
+                    ?.forEach { if (it.isDirectory) it.deleteRecursively() else it.delete() }
             }
             tasks.remove(id)
         }
@@ -260,16 +263,19 @@ object DownloadManager {
             task.error = e.message ?: "下载失败"
             Log.e(TAG, "Download failed: ${task.title}", e)
         } finally {
-            // Catch-all: remove any leftover temp dirs in the save directory
+            // Catch-all: remove any leftover temp dirs in the save directory,
+            // unless the task was paused (resume() must find its partial segments).
             try {
-                val prefix = ".temp_${task.videoId}_${task.epIndex}"
-                File(task.saveDir).listFiles()?.filter {
-                    it.isDirectory && it.name.startsWith(prefix)
-                }?.forEach {
-                    if (it.deleteRecursively()) {
-                        Log.e(TAG, "Post-download cleanup: removed ${it.name}")
-                    } else {
-                        Log.e(TAG, "Post-download cleanup: FAILED to remove ${it.name}")
+                if (TsDownloader.shouldCleanupTempDir(task.status)) {
+                    val prefix = ".temp_${task.videoId}_${task.epIndex}"
+                    File(task.saveDir).listFiles()?.filter {
+                        it.isDirectory && it.name.startsWith(prefix)
+                    }?.forEach {
+                        if (it.deleteRecursively()) {
+                            Log.e(TAG, "Post-download cleanup: removed ${it.name}")
+                        } else {
+                            Log.e(TAG, "Post-download cleanup: FAILED to remove ${it.name}")
+                        }
                     }
                 }
             } catch (_: Exception) {}

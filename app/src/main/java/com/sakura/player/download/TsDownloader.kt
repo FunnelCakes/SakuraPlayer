@@ -24,6 +24,15 @@ object TsDownloader {
     )
 
     /**
+     * Whether a temp dir should be deleted after a download attempt ends.
+     *
+     * Paused downloads must keep their partial segments so resume() can continue
+     * where it left off. Every other terminal state (completed, failed, retry via
+     * queued, cancel) should clean up the temp dir.
+     */
+    internal fun shouldCleanupTempDir(status: String): Boolean = status != "paused"
+
+    /**
      * Probe a CDN's speed by downloading the first 64KB of the first TS segment.
      * Returns speed in MB/s, or 0.0 if unreachable.
      */
@@ -241,10 +250,16 @@ object TsDownloader {
             mergeSegments(tempDir, task, total)
             Log.e(TAG, "Download done: ${task.title} ep${task.epIndex}")
         } finally {
-            // Always clean up temp dir, even on cancellation or failure
-            if (tempDir.exists()) {
-                tempDir.deleteRecursively()
-                Log.e(TAG, "Temp dir cleaned up: $tempDir")
+            // Clean up temp dir unless paused. Pausing cancels this coroutine, which
+            // propagates CancellationException through here; the partial segments must
+            // survive so resume() can pick up where it left off.
+            if (shouldCleanupTempDir(task.status)) {
+                if (tempDir.exists()) {
+                    tempDir.deleteRecursively()
+                    Log.e(TAG, "Temp dir cleaned up: $tempDir")
+                }
+            } else {
+                Log.e(TAG, "Paused — preserving temp dir for resume: $tempDir")
             }
         }
     }
@@ -301,39 +316,95 @@ object TsDownloader {
                 Log.e(TAG, "No variants found, falling through to media parsing")
             }
 
-            // Media playlist
-            var keyUrl: String? = null
-            var iv: ByteArray? = null
-            val segments = mutableListOf<String>()
-            val lines = content.lines()
-
-            for (i in lines.indices) {
-                val line = lines[i]
-                if (line.startsWith("#EXT-X-KEY")) {
-                    Regex("URI=\"([^\"]+)\"").find(line)?.let { keyUrl = it.groupValues[1] }
-                    Regex("IV=0x([0-9a-fA-F]+)").find(line)?.let {
-                        val hex = it.groupValues[1]
-                        iv = ByteArray(16) { j -> hex.substring(j*2, j*2+2).toInt(16).toByte() }
-                    }
-                }
-                if (!line.startsWith("#") && line.isNotBlank()) {
-                    val segUrl = when {
-                        line.startsWith("http") -> line
-                        line.startsWith("/") -> {
-                            val uri = java.net.URI(url)
-                            "${uri.scheme}://${uri.host}$line"
-                        }
-                        else -> baseUrl + line
-                    }
-                    segments.add(segUrl)
-                }
-            }
-            M3u8Info(segments, keyUrl, iv)
+            // Media playlist (pure parser handles ad-skipping via CUE-OUT/CUE-IN,
+            // DATERANGE markers and returns resolved segment URLs)
+            return@withContext parseM3u8Media(content, url)
         } catch (e: Exception) {
             val msg = if (e is ParseError) e.message else (e.message ?: "未知错误")
             Log.e(TAG, "parseM3u8 failed: $msg", e)
             throw Exception("解析视频失败: $msg")
         }
+    }
+
+    /**
+     * Parse an HLS media playlist, skipping advertisement segments.
+     *
+     * Ads are detected via standard HLS markers:
+     *  - #EXT-X-CUE-OUT / #EXT-X-CUE-IN (classic SCTE-35 splice markers)
+     *  - #EXT-X-DATERANGE with an ad/interstitial CLASS or SCTE35-OUT / SCTE35-IN
+     *
+     * While inside an ad block, segment URIs are NOT collected so ads never get
+     * downloaded or merged into the final MP4. This is a pure function (no network
+     * or Android dependencies) so it can be unit tested on the JVM.
+     */
+    internal fun parseM3u8Media(content: String, url: String): M3u8Info {
+        val baseUrl = url.substringBeforeLast("/") + "/"
+        var keyUrl: String? = null
+        var iv: ByteArray? = null
+        val segments = mutableListOf<String>()
+        val lines = content.lines()
+        var inAd = false
+        var adSegmentsSkipped = 0
+
+        for (line in lines) {
+            val trimmed = line.trim()
+            when {
+                trimmed.startsWith("#EXT-X-KEY") -> {
+                    Regex("URI=\"([^\"]+)\"").find(trimmed)?.let { keyUrl = it.groupValues[1] }
+                    Regex("IV=0x([0-9a-fA-F]+)").find(trimmed)?.let {
+                        val hex = it.groupValues[1]
+                        // IV must be 32 hex chars (16 bytes); guard against short/malformed values
+                        if (hex.length >= 32) {
+                            iv = ByteArray(16) { j -> hex.substring(j * 2, j * 2 + 2).toInt(16).toByte() }
+                        }
+                    }
+                }
+                trimmed.startsWith("#EXT-X-CUE-OUT") -> {
+                    inAd = true
+                    Log.e(TAG, "Ad marker: CUE-OUT (ad starts)")
+                }
+                trimmed.startsWith("#EXT-X-CUE-IN") -> {
+                    inAd = false
+                    Log.e(TAG, "Ad marker: CUE-IN (ad ends)")
+                }
+                trimmed.startsWith("#EXT-X-DATERANGE") -> {
+                    val lower = trimmed.lowercase()
+                    if (lower.contains("scte35-in")) {
+                        inAd = false
+                        Log.e(TAG, "Ad marker: DATERANGE SCTE35-IN (ad ends)")
+                    } else {
+                        val cls = Regex("CLASS=\"([^\"]*)\"").find(trimmed)?.groupValues?.get(1)?.lowercase() ?: ""
+                        val isAdClass = cls.contains("ad") || cls.contains("interstitial") || cls.contains("advertisement")
+                        if (isAdClass || lower.contains("scte35-out")) {
+                            inAd = true
+                            Log.e(TAG, "Ad marker: DATERANGE ad class/SCTE35-OUT (ad starts)")
+                        }
+                    }
+                }
+                trimmed.startsWith("#") -> {
+                    // Ignore all other tags
+                }
+                trimmed.isNotBlank() -> {
+                    if (inAd) {
+                        adSegmentsSkipped++
+                        continue
+                    }
+                    val segUrl = when {
+                        trimmed.startsWith("http") -> trimmed
+                        trimmed.startsWith("/") -> {
+                            val uri = java.net.URI(url)
+                            "${uri.scheme}://${uri.host}$trimmed"
+                        }
+                        else -> baseUrl + trimmed
+                    }
+                    segments.add(segUrl)
+                }
+            }
+        }
+        if (adSegmentsSkipped > 0) {
+            Log.e(TAG, "Skipped $adSegmentsSkipped ad segment(s)")
+        }
+        return M3u8Info(segments, keyUrl, iv)
     }
 
     private fun decryptAes128(data: ByteArray, key: ByteArray, iv: ByteArray): ByteArray {
