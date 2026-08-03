@@ -66,6 +66,13 @@ class MainActivity : AppCompatActivity() {
     // the wrong episode when the user taps episodes rapidly.
     private var resolveJob: Job? = null
 
+    // Whether the inline (GSY) player is still supposed to be visible. Set true in
+    // playOnlineInline/playLocalInline, false in hideInlinePlayer. Used to guard the
+    // async m3u8 resolution completion: if the user backed out during loading, the
+    // pending resolveJob is cancelled and this flag is false, so a stale completion
+    // can never re-show the player after the detail page closed.
+    @Volatile private var inlinePlayerActive = false
+
     // SAF directory picker for custom download path
     private val safPickerLauncher = registerForActivityResult(
         ActivityResultContracts.OpenDocumentTree()
@@ -596,13 +603,22 @@ class MainActivity : AppCompatActivity() {
                 gsyPlayer.currentEpIndex = epIndex
                 gsyPlayer.isLocal = false
                 gsyPlayer.currentVideoId = videoId
+                inlinePlayerActive = true
                 resolveJob?.cancel()  // cancel any previous m3u8 resolution
                 resolveJob = scope.launch {
                     val m3u8 = bridge.resolveM3u8Url(videoId, epIndex)
                     if (m3u8 == null) {
-                        evalJs("if(window.showToast)window.showToast('无法获取播放地址')")
+                        if (inlinePlayerActive) {
+                            evalJs("if(window.showToast)window.showToast('无法获取播放地址')")
+                            gsyPlayer.visibility = View.GONE
+                        }
                         return@launch
                     }
+                    // If the user backed out (hideInlinePlayer) while the m3u8 URL was being
+                    // resolved, resolveJob was cancelled and inlinePlayerActive is false.
+                    // Cancellation is cooperative, so guard here too: a stale completion must
+                    // never re-show the player after the detail page closed.
+                    if (!inlinePlayerActive) return@launch
                     positionAndSetupGsyPlayer(xPx, yPx, wPx, hPx, m3u8, true, title)
                 }
             }
@@ -616,6 +632,9 @@ class MainActivity : AppCompatActivity() {
                     evalJs("if(window.showToast)window.showToast('文件不存在: $path')")
                     return@runOnUiThread
                 }
+                // A pending online m3u8 resolution must not fire after switching to local.
+                resolveJob?.cancel()
+                inlinePlayerActive = true
                 // Store the real episode list (previously the JS always passed '[]').
                 gsyPlayer.episodeList = parseEpisodes(episodesJson)
                 gsyPlayer.isLocal = true
@@ -631,8 +650,13 @@ class MainActivity : AppCompatActivity() {
 
         @JavascriptInterface fun hideInlinePlayer() {
             runOnUiThread {
-                gsyPlayer.onVideoPause()
-                gsyPlayer.visibility = View.GONE
+                inlinePlayerActive = false
+                resolveJob?.cancel()  // cancel any pending m3u8 resolution so a stale
+                                      // completion can't re-show the player after backing out
+                if (::gsyPlayer.isInitialized) {
+                    gsyPlayer.onVideoPause()
+                    gsyPlayer.visibility = View.GONE
+                }
             }
         }
 
@@ -792,9 +816,14 @@ class MainActivity : AppCompatActivity() {
             resolveJob = scope.launch {
                 val m3u8 = bridge.resolveM3u8Url(videoId, ep.index)
                 if (m3u8 == null) {
-                    evalJs("if(window.showToast)window.showToast('无法获取播放地址')")
+                    if (inlinePlayerActive) {
+                        evalJs("if(window.showToast)window.showToast('无法获取播放地址')")
+                    }
                     return@launch
                 }
+                // Guard against re-showing the player if the user backed out (hideInlinePlayer)
+                // while the m3u8 URL was being resolved.
+                if (!inlinePlayerActive) return@launch
                 switchGsyToUrl(player, m3u8, true, title)
             }
         }
