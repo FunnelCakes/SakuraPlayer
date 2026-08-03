@@ -17,10 +17,33 @@ object TsDownloader {
     private const val TAG = "TsDownloader"
     const val CONCURRENT_THREADS = 16
 
-    data class M3u8Info(
+    internal data class M3u8Info(
         val segments: List<String>,
         val keyUrl: String?,
-        val iv: ByteArray?
+        val iv: ByteArray?,
+        /**
+         * Layered ad-detection block structure. Each [BlockInfo] is a
+         * #EXT-X-DISCONTINUITY-bounded (or marker-bounded) group of segments with a
+         * Layer-1 confidence score. The flat [segments] list excludes probable-ad
+         * blocks but still includes "suspicious" blocks (those needing a Layer-2 SPS
+         * probe).
+         */
+        val blocks: List<BlockInfo> = emptyList(),
+        /**
+         * Index into [blocks] of the first content block, whose first segment's H.264
+         * SPS is used as the dynamic baseline for Layer-2 probe comparison.
+         */
+        val baselineBlockIndex: Int = -1
+    )
+
+    /** One DISCONTINUITY/marker-bounded group of segments plus its Layer-1 score. */
+    internal data class BlockInfo(
+        val segments: List<SegmentEntry>,
+        val score: Int,
+        val isProbableAd: Boolean,
+        val isSuspicious: Boolean,
+        /** Index of this block's first segment in the flat [M3u8Info.segments] list, or -1 if the block is filtered out. */
+        val flatStartIndex: Int
     )
 
     /**
@@ -142,8 +165,18 @@ object TsDownloader {
         try {
             val startTime = System.currentTimeMillis()
             val completed = AtomicInteger(0)
-            val total = info.segments.size
-            Log.e(TAG, "Downloading $total segments ($threadCount threads)")
+
+            // Layered ad detection: probable-ad blocks were filtered at parse time;
+            // this finalizes the list by probing each "suspicious" block's first segment
+            // against the content baseline SPS (Layer 2 + Layer 3).
+            val finalSegments = buildDownloadSegmentList(info, downloadClient, referer, aesKey, info.iv)
+            val total = finalSegments.size
+            Log.e(TAG, "Downloading $total segments after layered ad detection ($threadCount threads)")
+            if (total == 0) {
+                task.status = "failed"
+                task.error = "m3u8中未找到可下载的视频分片（可能全部为广告）"
+                return@withContext
+            }
 
             // Count already-downloaded segments for resume
             val existingCount = (0 until total).count { i ->
@@ -180,7 +213,7 @@ object TsDownloader {
                             while (retries > 0 && !success) {
                                 try {
                                     ensureActive()  // Check for cancellation before each HTTP request
-                                    val segReqBuilder = Request.Builder().url(info.segments[i]).get()
+                                    val segReqBuilder = Request.Builder().url(finalSegments[i]).get()
                                     HttpClient.browserHeaders(referer).forEach { (k, v) -> segReqBuilder.header(k, v) }
                                     downloadClient.newCall(segReqBuilder.build()).execute().use { resp ->
                                         if (resp.isSuccessful) {
@@ -326,11 +359,16 @@ object TsDownloader {
         }
     }
 
-    /** Structural fallback: a DISCONTINUITY block whose median duration is below this is
-     *  considered an ad (content on yinghua mirrors is uniformly ~3.75s; ads are ~1.3-3.3s). */
+    /**
+     * A DISCONTINUITY block whose median duration is below this value gets +2 score
+     * (content on yinghua mirrors is uniformly ~3.75s; ads are ~1.3-3.3s).
+     */
     private const val AD_BLOCK_MAX_MEDIAN_DURATION = 3.0
 
-    private data class SegmentEntry(val url: String, val duration: Double?)
+    /** A block scoring at or above this is auto-skipped at parse time (Layer 1). */
+    private const val AD_PROBABLE_AD_THRESHOLD = 4
+
+    internal data class SegmentEntry(val url: String, val duration: Double?)
 
     /** Path directory (up to the last '/') of an absolute segment URL, or null if unparseable. */
     private fun segmentPathDir(segmentUrl: String): String? {
@@ -340,25 +378,88 @@ object TsDownloader {
         } catch (_: Exception) { null }
     }
 
+    /** Filename (last path segment, query stripped) of an absolute segment URL. */
+    private fun segmentFileName(segmentUrl: String): String {
+        return try {
+            val path = java.net.URI(segmentUrl).path ?: segmentUrl
+            path.substringAfterLast('/').substringBefore('?')
+        } catch (_: Exception) { segmentUrl }
+    }
+
+    /** Bitrate marker path segment like "1026kb" or "10137kb", or null if absent. */
+    private fun bitrateMarker(segmentUrl: String): String? {
+        val dir = segmentPathDir(segmentUrl) ?: return null
+        return Regex("/(\\d+kb)/").find(dir)?.groupValues?.get(1)
+    }
+
+    private fun blockMedianDuration(block: List<SegmentEntry>): Double? {
+        val durs = block.mapNotNull { it.duration }
+        if (durs.isEmpty()) return null
+        val s = durs.sorted()
+        val mid = s.size / 2
+        return if (s.size % 2 == 0) (s[mid - 1] + s[mid]) / 2.0 else s[mid]
+    }
+
+    /** True if any segment filename in this block also appears in a different block. */
+    private fun hasRepeatedFilenames(block: List<SegmentEntry>, blockIndex: Int, allBlocks: List<List<SegmentEntry>>): Boolean {
+        if (block.isEmpty()) return false
+        val names = block.map { segmentFileName(it.url) }.toSet()
+        for ((i, other) in allBlocks.withIndex()) {
+            if (i == blockIndex) continue
+            if (other.any { segmentFileName(it.url) in names }) return true
+        }
+        return false
+    }
+
+    /**
+     * Layer 1 parse-time ad scoring. Returns a per-block confidence score from
+     * independent signals (each additive, never cancels):
+     *   - CUE/DATERANGE ad marker on the block            -> +5 (auto-ad)
+     *   - segment filenames repeated across other blocks  -> +3
+     *   - URL directory differs from the content directory-> +3
+     *   - URL path bitrate marker differs from content    -> +2
+     *   - median duration below 3.0s                      -> +2
+     * Score >= [AD_PROBABLE_AD_THRESHOLD] => probable ad (skipped at download).
+     * Score 1..3 => suspicious (needs a Layer-2 SPS probe).
+     * Score 0    => normal content.
+     *
+     * The directory/bitrate heuristics only fire when at least one block actually lives
+     * in the media playlist's content directory; otherwise a nonstandard playlist URL
+     * could cause every block to be misclassified.
+     */
+    private fun scoreBlock(
+        block: List<SegmentEntry>,
+        blockIndex: Int,
+        allBlocks: List<List<SegmentEntry>>,
+        contentDir: String?,
+        contentBitrate: String?,
+        applyDirHeuristics: Boolean,
+        adViaMarker: Boolean
+    ): Int {
+        var score = 0
+        if (adViaMarker) score += 5
+        if (block.isNotEmpty() && applyDirHeuristics && block.none { segmentPathDir(it.url) == contentDir }) score += 3
+        if (block.isNotEmpty() && applyDirHeuristics && contentBitrate != null &&
+            block.any { bitrateMarker(it.url) != null && bitrateMarker(it.url) != contentBitrate }) score += 2
+        if (hasRepeatedFilenames(block, blockIndex, allBlocks)) score += 3
+        val median = blockMedianDuration(block)
+        if (median != null && median < AD_BLOCK_MAX_MEDIAN_DURATION) score += 2
+        return score
+    }
+
     /**
      * Parse an HLS media playlist, skipping advertisement segments.
      *
-     * Ads are detected two ways:
-     *  1. Standard HLS ad markers:
-     *     - #EXT-X-CUE-OUT / #EXT-X-CUE-IN (classic SCTE-35 splice markers)
-     *     - #EXT-X-DATERANGE with an ad/interstitial CLASS or SCTE35-OUT / SCTE35-IN
-     *  2. Structural fallback for CDNs that inject ads WITHOUT marker tags (confirmed on
-     *     yinghua14.com mirrors, where ad segments come from a wholly separate stream path,
-     *     e.g. /20260727/<adId>/10137kb/hls/, and have short, irregular durations). A
-     *     #EXT-X-DISCONTINUITY-bounded block is treated as an ad block when BOTH:
-     *       - none of its segment URLs share the media playlist's content directory, AND
-     *       - the block's median segment duration is below [AD_BLOCK_MAX_MEDIAN_DURATION].
-     *     The "at least one block matches the media directory" guard prevents a nonstandard
-     *     playlist URL from causing every block to be misclassified as an ad.
+     * Implements the layered ad-detection scheme:
+     *   Layer 1 (parse-time, zero bandwidth): every #EXT-X-DISCONTINUITY-bounded block
+     *     is scored via [scoreBlock]. Blocks scoring >= 4 are dropped from the flat
+     *     [M3u8Info.segments] list; blocks scoring 1..3 are kept but flagged "suspicious"
+     *     so the download flow can run a Layer-2 probe. Blocks scoring 0 are content.
+     *   Layer 3 (dynamic baseline): [M3u8Info.baselineBlockIndex] points at the first
+     *     content block; the download flow extracts its SPS as the comparison baseline.
      *
-     * While inside an ad block, segment URIs are NOT collected so ads never get downloaded
-     * or merged into the final MP4. This is a pure function (no network or Android
-     * dependencies) so it can be unit tested on the JVM.
+     * This is a pure function (no network or Android dependencies) so it can be unit
+     * tested on the JVM.
      */
     internal fun parseM3u8Media(content: String, url: String): M3u8Info {
         val baseUrl = url.substringBeforeLast("/") + "/"
@@ -368,12 +469,30 @@ object TsDownloader {
         var keyUrl: String? = null
         var iv: ByteArray? = null
         var currentDuration: Double? = null
+
+        // Marker-based ad tracking. CUE-OUT / DATERANGE-ad opens a dedicated ad block;
+        // CUE-IN / DATERANGE-in closes it and opens a fresh content block, so marker ads
+        // never pollute a block that also holds legitimate content.
         var inAd = false
         var adSegmentsSkippedByMarker = 0
 
-        // Blocks are separated by #EXT-X-DISCONTINUITY; used by the structural fallback.
         val blocks = mutableListOf<MutableList<SegmentEntry>>()
+        val blockAdMarkers = mutableListOf<Boolean>()
         blocks.add(mutableListOf())
+        blockAdMarkers.add(false)
+
+        fun startAdBlock() {
+            blocks.add(mutableListOf())
+            blockAdMarkers.add(true)
+            inAd = true
+        }
+
+        fun endAdBlock() {
+            inAd = false
+            blocks.add(mutableListOf())
+            blockAdMarkers.add(false)
+        }
+
         val lines = content.lines()
 
         for (line in lines) {
@@ -393,29 +512,30 @@ object TsDownloader {
                     currentDuration = Regex("#EXTINF:\\s*([\\d.]+)").find(trimmed)?.groupValues?.get(1)?.toDoubleOrNull()
                 }
                 trimmed.startsWith("#EXT-X-CUE-OUT") -> {
-                    inAd = true
+                    if (!inAd) startAdBlock()
                     Log.e(TAG, "Ad marker: CUE-OUT (ad starts)")
                 }
                 trimmed.startsWith("#EXT-X-CUE-IN") -> {
-                    inAd = false
+                    if (inAd) endAdBlock()
                     Log.e(TAG, "Ad marker: CUE-IN (ad ends)")
                 }
                 trimmed.startsWith("#EXT-X-DATERANGE") -> {
                     val lower = trimmed.lowercase()
                     if (lower.contains("scte35-in")) {
-                        inAd = false
+                        if (inAd) endAdBlock()
                         Log.e(TAG, "Ad marker: DATERANGE SCTE35-IN (ad ends)")
                     } else {
                         val cls = Regex("CLASS=\"([^\"]*)\"").find(trimmed)?.groupValues?.get(1)?.lowercase() ?: ""
                         val isAdClass = cls.contains("ad") || cls.contains("interstitial") || cls.contains("advertisement")
                         if (isAdClass || lower.contains("scte35-out")) {
-                            inAd = true
+                            if (!inAd) startAdBlock()
                             Log.e(TAG, "Ad marker: DATERANGE ad class/SCTE35-OUT (ad starts)")
                         }
                     }
                 }
                 trimmed.startsWith("#EXT-X-DISCONTINUITY") -> {
                     blocks.add(mutableListOf())
+                    blockAdMarkers.add(false)
                 }
                 trimmed.startsWith("#") -> {
                     // Ignore all other tags
@@ -440,38 +560,224 @@ object TsDownloader {
             }
         }
 
-        // Structural fallback: drop DISCONTINUITY-bounded blocks that come from a different
-        // stream directory AND have abnormally short segments (the confirmed ad signature).
+        // Layer 1 scoring: compute a confidence score for every block.
         val contentDirMatches = blocks.count { block -> block.any { segmentPathDir(it.url) == contentDir } }
-        val segments = mutableListOf<String>()
-        var adSegmentsSkippedByBlock = 0
-        if (contentDir != null && contentDirMatches > 0) {
-            for (block in blocks) {
-                val noSegmentMatchesContent = block.none { segmentPathDir(it.url) == contentDir }
-                val medianDuration = block.mapNotNull { it.duration }.let { durs ->
-                    if (durs.isEmpty()) null else durs.sorted().let { s ->
-                        val mid = s.size / 2
-                        if (s.size % 2 == 0) (s[mid - 1] + s[mid]) / 2.0 else s[mid]
-                    }
-                }
-                if (noSegmentMatchesContent && medianDuration != null && medianDuration < AD_BLOCK_MAX_MEDIAN_DURATION) {
-                    adSegmentsSkippedByBlock += block.size
-                    Log.e(TAG, "Ad block skipped via content-path + duration heuristic (n=${block.size})")
-                } else {
-                    segments.addAll(block.map { it.url })
-                }
-            }
-        } else {
-            for (block in blocks) segments.addAll(block.map { it.url })
+        val applyDirHeuristics = contentDir != null && contentDirMatches > 0
+        val contentBitrate = contentDir?.let { Regex("/(\\d+kb)/").find(it)?.groupValues?.get(1) }
+        val scores = blocks.mapIndexed { idx, block ->
+            scoreBlock(block, idx, blocks, contentDir, contentBitrate, applyDirHeuristics, blockAdMarkers[idx])
         }
+
+        // Build the flat kept-segment list (probable-ad blocks dropped, suspicious kept).
+        val segments = mutableListOf<String>()
+        val blockInfos = mutableListOf<BlockInfo>()
+        var adSegmentsSkippedByBlock = 0
+        var flatIndex = 0
+        for ((idx, block) in blocks.withIndex()) {
+            val score = scores[idx]
+            val isProbableAd = score >= AD_PROBABLE_AD_THRESHOLD
+            if (isProbableAd) {
+                adSegmentsSkippedByBlock += block.size
+                Log.e(TAG, "Ad block skipped via layered scoring (score=$score, n=${block.size})")
+                blockInfos.add(BlockInfo(block, score, true, score in 1..3, -1))
+            } else {
+                blockInfos.add(BlockInfo(block, score, false, score in 1..3, flatIndex))
+                flatIndex += block.size
+                segments.addAll(block.map { it.url })
+            }
+        }
+
+        // Layer 3: the dynamic baseline is the first normal-content block.
+        val baselineBlockIndex = blocks.indices.firstOrNull { scores[it] == 0 && blocks[it].isNotEmpty() }
+            ?: blocks.indices.firstOrNull { scores[it] < AD_PROBABLE_AD_THRESHOLD && blocks[it].isNotEmpty() }
+            ?: -1
 
         if (adSegmentsSkippedByMarker > 0) {
             Log.e(TAG, "Skipped $adSegmentsSkippedByMarker ad segment(s) via CUE/DATERANGE markers")
         }
         if (adSegmentsSkippedByBlock > 0) {
-            Log.e(TAG, "Skipped $adSegmentsSkippedByBlock ad segment(s) via content-path/duration heuristic")
+            Log.e(TAG, "Skipped $adSegmentsSkippedByBlock ad segment(s) via layered scoring")
         }
-        return M3u8Info(segments, keyUrl, iv)
+        return M3u8Info(segments, keyUrl, iv, blockInfos, baselineBlockIndex)
+    }
+
+    // ---------------------------------------------------------------------------
+    // Layer 2: SPS probe verification.
+    //
+    // extractSpsProfile is a pure function over TS bytes: it walks MPEG-TS packets,
+    // collects their payloads, finds the first H.264 SPS NAL (type 7) and returns a
+    // compact "H264_<Profile>_L<level>" signature used for baseline + comparison.
+    // ---------------------------------------------------------------------------
+
+    internal fun extractSpsProfile(tsBytes: ByteArray): String? {
+        if (tsBytes.isEmpty()) return null
+        val payloads = java.io.ByteArrayOutputStream(tsBytes.size)
+        var i = 0
+        while (i + 188 <= tsBytes.size) {
+            if (tsBytes[i] != 0x47.toByte()) { i++; continue }
+            val adapt = tsBytes[i + 3].toInt() and 0x30
+            when (adapt) {
+                0x30 -> { // adaptation field + payload
+                    val alen = tsBytes[i + 4].toInt() and 0xFF
+                    val p = i + 5 + alen
+                    if (p < i + 188) payloads.write(tsBytes, p, (i + 188) - p)
+                }
+                0x10 -> payloads.write(tsBytes, i + 4, 184) // payload only
+                else -> {} // adaptation-only / reserved: no payload
+            }
+            i += 188
+        }
+        return parseSpsFromAnnexB(payloads.toByteArray())
+    }
+
+    private fun parseSpsFromAnnexB(data: ByteArray): String? {
+        var i = 0
+        while (i + 4 <= data.size) {
+            if (data[i] == 0.toByte() && data[i + 1] == 0.toByte()) {
+                var nalStart = -1
+                if (data[i + 2] == 1.toByte()) {
+                    nalStart = i + 3
+                } else if (i + 3 < data.size && data[i + 2] == 0.toByte() && data[i + 3] == 1.toByte()) {
+                    nalStart = i + 4
+                }
+                if (nalStart >= 0) {
+                    val nalType = data[nalStart].toInt() and 0x1F
+                    if (nalType == 7) {
+                        return parseSpsPayload(data, nalStart + 1)
+                    }
+                    // Advance to the next start code to keep the scan linear.
+                    var j = nalStart + 1
+                    while (j + 4 <= data.size) {
+                        if (data[j] == 0.toByte() && data[j + 1] == 0.toByte() &&
+                            (data[j + 2] == 1.toByte() ||
+                                (j + 3 < data.size && data[j + 2] == 0.toByte() && data[j + 3] == 1.toByte()))) {
+                            break
+                        }
+                        j++
+                    }
+                    i = j
+                    continue
+                }
+            }
+            i++
+        }
+        return null
+    }
+
+    private fun parseSpsPayload(data: ByteArray, offset: Int): String? {
+        if (offset + 3 >= data.size) return null
+        val profileIdc = data[offset].toInt() and 0xFF
+        val levelIdc = data[offset + 2].toInt() and 0xFF
+        val profileName = when (profileIdc) {
+            66 -> "Baseline"
+            77 -> "Main"
+            88 -> "Extended"
+            100 -> "High"
+            110 -> "High10"
+            122 -> "High422"
+            244 -> "High444"
+            else -> "Profile$profileIdc"
+        }
+        return "H264_${profileName}_L${levelIdc / 10.0}"
+    }
+
+    /**
+     * Download one segment's (decrypted) bytes. Returns null on any failure. Used by the
+     * Layer-2 SPS probe so the download flow can verify "suspicious" blocks without
+     * touching the temp dir.
+     */
+    private suspend fun downloadSegmentBytes(
+        url: String,
+        client: OkHttpClient,
+        referer: String,
+        aesKey: ByteArray?,
+        iv: ByteArray?,
+        index: Int
+    ): ByteArray? = withContext(Dispatchers.IO) {
+        try {
+            val segReqBuilder = Request.Builder().url(url).get()
+            HttpClient.browserHeaders(referer).forEach { (k, v) -> segReqBuilder.header(k, v) }
+            client.newCall(segReqBuilder.build()).execute().use { resp ->
+                if (!resp.isSuccessful) return@withContext null
+                val raw = resp.body?.bytes() ?: return@withContext null
+                if (aesKey != null) {
+                    val ivBytes = iv ?: ByteArray(16).apply {
+                        for (j in 0..15) this[j] = ((index shr ((15 - j % 8) * 8)) and 0xFF).toByte()
+                    }
+                    try { decryptAes128(raw, aesKey, ivBytes) } catch (_: Exception) { null }
+                } else raw
+            }
+        } catch (_: Exception) { null }
+    }
+
+    /**
+     * Layer 2 + 3: decide the final download list from the parsed block structure.
+     *
+     *  - probable-ad blocks are already excluded by [M3u8Info.segments]; this rebuilds
+     *    the list from [M3u8Info.blocks] so suspicious blocks can be dropped too.
+     *  - The first content block's SPS becomes the baseline (Layer 3).
+     *  - For each suspicious block we download ONLY its first segment, parse its SPS,
+     *    and compare with the baseline. Mismatch => confirmed ad, block skipped.
+     *    Match (or an inconclusive probe) => the block is kept (conservative — never
+     *    drops legitimate content).
+     */
+    private suspend fun buildDownloadSegmentList(
+        info: M3u8Info,
+        client: OkHttpClient,
+        referer: String,
+        aesKey: ByteArray?,
+        iv: ByteArray?
+    ): List<String> {
+        if (info.blocks.isEmpty()) return info.segments
+
+        val suspiciousBlocks = info.blocks.filter { it.isSuspicious }
+        val needsBaseline = suspiciousBlocks.isNotEmpty()
+        if (!needsBaseline) return info.segments
+
+        // Layer 3: establish the dynamic baseline from the first content block.
+        val baseBlock = if (info.baselineBlockIndex in info.blocks.indices) info.blocks[info.baselineBlockIndex] else null
+        if (baseBlock == null || baseBlock.segments.isEmpty()) return info.segments
+        val baselineSps = probeSps(baseBlock.segments[0].url, client, referer, aesKey, iv, baseBlock.flatStartIndex)
+        Log.e(TAG, "Baseline SPS (block ${info.baselineBlockIndex}): $baselineSps")
+        if (baselineSps == null) {
+            // No baseline available; cannot verify suspicious blocks — keep everything.
+            Log.e(TAG, "No baseline SPS available; keeping all suspicious blocks (conservative)")
+            return info.segments
+        }
+
+        val result = mutableListOf<String>()
+        var skipped = 0
+        for (block in info.blocks) {
+            if (block.isProbableAd) {
+                skipped += block.segments.size
+                continue
+            }
+            if (block.isSuspicious) {
+                if (block.segments.isEmpty()) continue
+                val sps = probeSps(block.segments[0].url, client, referer, aesKey, iv, block.flatStartIndex)
+                if (sps != null && sps != baselineSps) {
+                    skipped += block.segments.size
+                    Log.e(TAG, "Suspicious block confirmed ad via SPS (sps=$sps, baseline=$baselineSps, n=${block.segments.size})")
+                    continue
+                }
+                Log.e(TAG, "Suspicious block kept after SPS probe (sps=$sps, baseline=$baselineSps, n=${block.segments.size})")
+            }
+            result.addAll(block.segments.map { it.url })
+        }
+        if (skipped > 0) Log.e(TAG, "Layered ad detection: skipped $skipped segments after probing")
+        return result
+    }
+
+    private suspend fun probeSps(
+        url: String,
+        client: OkHttpClient,
+        referer: String,
+        aesKey: ByteArray?,
+        iv: ByteArray?,
+        index: Int
+    ): String? {
+        val bytes = downloadSegmentBytes(url, client, referer, aesKey, iv, index) ?: return null
+        return extractSpsProfile(bytes)
     }
 
     private fun decryptAes128(data: ByteArray, key: ByteArray, iv: ByteArray): ByteArray {
