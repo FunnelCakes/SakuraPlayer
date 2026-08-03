@@ -87,7 +87,7 @@ object DownloadRecordManager {
             val videoId = searchVideoId(dir.name)
             val title = dir.name
 
-            dir.listFiles()?.filter { it.name.endsWith(".mp4") || it.name.endsWith(".mkv") }?.forEach { file ->
+            dir.listFiles()?.filter { com.sakura.player.local.LocalFileManager.isVideoFile(it.name) }?.forEach { file ->
                 val existing = dao.getDownloadRecord(file.absolutePath)
                 if (existing == null) {
                     val patterns = listOf(

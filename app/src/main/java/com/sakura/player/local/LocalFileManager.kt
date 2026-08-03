@@ -43,7 +43,7 @@ object LocalFileManager {
 
         for (f in children) {
             if (f.isHidden || f.name.startsWith(".")) continue
-            if (f.isFile && !f.name.endsWith(".mp4") && !f.name.endsWith(".mkv")) continue
+            if (f.isFile && !isVideoFile(f.name)) continue
 
             val coverKey = if (f.isDirectory) {
                 // IP root: try videoId from folder name; nested: first child
@@ -64,6 +64,18 @@ object LocalFileManager {
             ))
         }
         return items
+    }
+
+    /**
+     * True for filenames the app treats as video. Includes the historical .mp4/.mkv
+     * plus the custom [com.sakura.player.download.Mp4Remuxer.EXTENSION] extension
+     * used for downloaded episodes (a real MP4 container that the media scanner
+     * does not index).
+     */
+    fun isVideoFile(name: String): Boolean {
+        val lower = name.lowercase()
+        return lower.endsWith(".mp4") || lower.endsWith(".mkv") ||
+            lower.endsWith("." + com.sakura.player.download.Mp4Remuxer.EXTENSION)
     }
 
     private fun findCoverKey(dir: File, rootPath: String): String {
@@ -87,7 +99,7 @@ object LocalFileManager {
         dir.listFiles()?.forEach { f ->
             if (!f.isHidden) {
                 when {
-                    f.isFile && (f.name.endsWith(".mp4") || f.name.endsWith(".mkv")) -> count++
+                    f.isFile && isVideoFile(f.name) -> count++
                     f.isDirectory -> count += countVideos(f)
                 }
             }

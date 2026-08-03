@@ -113,9 +113,9 @@ class JsBridge(private val ctx: Context) {
     private fun countEpisodes(dir: File): Int {
         var count = 0
         dir.listFiles()?.forEach { f ->
-            if (f.name.endsWith(".mp4")) count++
+            if (com.sakura.player.local.LocalFileManager.isVideoFile(f.name)) count++
             else if (f.isDirectory) {
-                f.listFiles()?.forEach { if (it.name.endsWith(".mp4")) count++ }
+                f.listFiles()?.forEach { if (com.sakura.player.local.LocalFileManager.isVideoFile(it.name)) count++ }
             }
         }
         return count
@@ -175,11 +175,13 @@ class JsBridge(private val ctx: Context) {
         val eps = JSONArray()
         val mp4Files = mutableListOf<File>()
 
-        // Collect mp4 files from dir and subdirs
+        // Collect video files from dir and subdirs
         dir.listFiles()?.filter { it.isDirectory }?.forEach { sub ->
-            sub.listFiles()?.filter { it.name.endsWith(".mp4") }?.sortedBy { it.name }?.forEach { mp4Files.add(it) }
+            sub.listFiles()?.filter { com.sakura.player.local.LocalFileManager.isVideoFile(it.name) }
+                ?.sortedBy { it.name }?.forEach { mp4Files.add(it) }
         }
-        dir.listFiles()?.filter { it.name.endsWith(".mp4") }?.sortedBy { it.name }?.forEach { mp4Files.add(it) }
+        dir.listFiles()?.filter { com.sakura.player.local.LocalFileManager.isVideoFile(it.name) }
+            ?.sortedBy { it.name }?.forEach { mp4Files.add(it) }
 
         mp4Files.forEachIndexed { idx, f ->
             eps.put(JSONObject().apply {

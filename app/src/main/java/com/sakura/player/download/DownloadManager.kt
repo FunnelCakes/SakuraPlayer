@@ -160,7 +160,8 @@ object DownloadManager {
                     val dirFile = java.io.File(expectedDir)
                     if (dirFile.exists() && dirFile.isDirectory) {
                         val matching = dirFile.listFiles()?.any {
-                            it.name.endsWith(".mp4") && it.name.contains("第${task.epIndex}集")
+                            com.sakura.player.local.LocalFileManager.isVideoFile(it.name) &&
+                                it.name.contains("第${task.epIndex}集")
                         } ?: false
                         if (matching) {
                             Log.e(TAG, "Already downloaded (by path): ${task.title} ep${task.epIndex}, skipping")
@@ -234,7 +235,7 @@ object DownloadManager {
                     task.progress = 100
                     Log.e(TAG, "Download done: ${task.title} ep${task.epIndex}")
                     try {
-                        val mp4Path = "${task.saveDir}/${task.title}_第${task.epIndex}集.mp4"
+                        val mp4Path = "${task.saveDir}/${Mp4Remuxer.downloadFileName(task.title, task.epIndex)}"
                         DownloadRecordManager.upsertRecord(
                             com.sakura.player.data.DownloadRecordEntity(
                                 localPath = mp4Path,

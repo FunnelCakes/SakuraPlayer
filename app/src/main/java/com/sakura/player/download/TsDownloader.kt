@@ -789,19 +789,39 @@ object TsDownloader {
     private fun mergeSegments(tempDir: File, task: DownloadTask, total: Int) {
         val dir = File(task.saveDir)
         if (!dir.exists()) dir.mkdirs()
-        val outFile = File(dir, "${task.title}_第${task.epIndex}集.mp4")
+        val outFile = File(dir, Mp4Remuxer.downloadFileName(task.title, task.epIndex))
+
+        val segments = (0 until total).mapNotNull { i ->
+            val seg = File(tempDir, "${i.toString().padStart(6, '0')}.ts")
+            seg.takeIf { it.exists() && it.length() > 0 }
+        }
+        if (segments.isEmpty()) {
+            task.status = "failed"
+            task.error = "没有可合并的分片"
+            return
+        }
+
+        // Primary path: remux the concatenated TS into a real MP4 (moov/mdat).
+        val remuxed = Mp4Remuxer.remux(segments, outFile)
+        if (!remuxed) {
+            // Fallback: historical raw concatenation. The custom extension still keeps
+            // the media scanner away; ExoPlayer sniffs content, so a raw TS stream in a
+            // .svideo file still plays inside the app.
+            Log.e(TAG, "Remux failed; falling back to raw concatenation for ${outFile.name}")
+            concatSegments(segments, outFile)
+        }
+        Log.e(TAG, "Merged file size: ${outFile.length()} bytes")
+    }
+
+    private fun concatSegments(segments: List<File>, outFile: File) {
         RandomAccessFile(outFile, "rw").use { raf ->
-            for (i in 0 until total) {
-                val seg = File(tempDir, "${i.toString().padStart(6, '0')}.ts")
-                if (seg.exists() && seg.length() > 0) {
-                    seg.inputStream().use { input ->
-                        val buf = ByteArray(262144) // 256KB buffer for faster merge
-                        var r: Int
-                        while (input.read(buf).also { r = it } != -1) raf.write(buf, 0, r)
-                    }
+            for (seg in segments) {
+                seg.inputStream().use { input ->
+                    val buf = ByteArray(262144) // 256KB buffer for faster merge
+                    var r: Int
+                    while (input.read(buf).also { r = it } != -1) raf.write(buf, 0, r)
                 }
             }
         }
-        Log.e(TAG, "Merged file size: ${outFile.length()} bytes")
     }
 }
