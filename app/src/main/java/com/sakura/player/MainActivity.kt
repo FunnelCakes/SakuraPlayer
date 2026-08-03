@@ -15,6 +15,7 @@ import android.util.Log
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.webkit.*
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
@@ -272,7 +273,52 @@ class MainActivity : AppCompatActivity() {
         setContentView(rootLayout)
         Log.e("SakuraMain", "App started, WebView created, loading frontend")
 
+        // Splash overlay on COLD START only. The static splashShown flag means the
+        // splash renders exactly once per process: returning from background or an
+        // activity recreation (rotation) never shows it again. It is added LAST so it
+        // sits on top of the WebView and covers the app content while the frontend loads.
+        if (!splashShown) {
+            splashShown = true
+            showSplash(rootLayout)
+        }
+
         UpdateChecker.schedule(this, scope)
+    }
+
+    /**
+     * Overlay a white-background FrameLayout with the app image centered (FIT_CENTER)
+     * on top of the root layout. It stays visible for 1.5s, then fades out (~200ms)
+     * and removes itself.
+     */
+    private fun showSplash(root: FrameLayout) {
+        val splashView = FrameLayout(this).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+            setBackgroundColor(android.graphics.Color.WHITE)
+        }
+        splashView.addView(ImageView(this).apply {
+            setImageResource(R.drawable.splash_bg)
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        })
+        root.addView(splashView)
+
+        // Hide after exactly 1.5s with a short fade-out, then detach from the tree.
+        splashView.postDelayed({
+            splashView.animate()
+                .alpha(0f)
+                .setDuration(200)
+                .setInterpolator(android.view.animation.DecelerateInterpolator())
+                .withEndAction {
+                    (splashView.parent as? ViewGroup)?.removeView(splashView)
+                }
+                .start()
+        }, 1500)
     }
 
     private fun createDownloadDir() {
@@ -1000,5 +1046,14 @@ class MainActivity : AppCompatActivity() {
         webView.evaluateJavascript("handleBackPress(); window._shouldExit") { result ->
             if (result == "true") super.onBackPressed()
         }
+    }
+
+    companion object {
+        // Static process-wide guard: the splash shows only once per app launch.
+        // A fresh process (cold start) starts with this false; after onCreate has
+        // shown it once it stays true, so onResume (background return) and activity
+        // recreation (rotation) never re-show it.
+        @Volatile
+        private var splashShown = false
     }
 }
