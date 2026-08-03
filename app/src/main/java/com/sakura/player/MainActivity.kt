@@ -58,6 +58,11 @@ class MainActivity : AppCompatActivity() {
     // playing resumes (with position restored via onVideoResume()).
     private var wasPlayingBeforeBackground = true
 
+    // Guards async m3u8 resolution for the online inline player. Cancel the previous
+    // resolve coroutine before starting a new one so a stale completion can't set up
+    // the wrong episode when the user taps episodes rapidly.
+    private var resolveJob: Job? = null
+
     // SAF directory picker for custom download path
     private val safPickerLauncher = registerForActivityResult(
         ActivityResultContracts.OpenDocumentTree()
@@ -570,7 +575,8 @@ class MainActivity : AppCompatActivity() {
         @JavascriptInterface fun playOnlineInline(videoId: Long, title: String, epIndex: Int,
                                                    episodesJson: String, xPx: Int, yPx: Int, wPx: Int, hPx: Int) {
             runOnUiThread {
-                scope.launch {
+                resolveJob?.cancel()  // cancel any previous m3u8 resolution
+                resolveJob = scope.launch {
                     val m3u8 = bridge.resolveM3u8Url(videoId, epIndex)
                     if (m3u8 == null) {
                         evalJs("if(window.showToast)window.showToast('无法获取播放地址')")
@@ -582,16 +588,16 @@ class MainActivity : AppCompatActivity() {
         }
 
         @JavascriptInterface fun playLocalInline(path: String, episodesJson: String,
-                                                  xPx: Int, yPx: Int, wPx: Int, hPx: Int) {
+                                                  xPx: Int, yPx: Int, wPx: Int, hPx: Int, title: String) {
             runOnUiThread {
                 val file = File(path)
                 if (!file.exists()) {
                     evalJs("if(window.showToast)window.showToast('文件不存在: $path')")
                     return@runOnUiThread
                 }
-                val title = file.nameWithoutExtension
+                val finalTitle = if (title.isBlank()) file.nameWithoutExtension else title
                 val uri = FileProvider.getUriForFile(this@MainActivity, "$packageName.fileprovider", file)
-                positionAndSetupGsyPlayer(xPx, yPx, wPx, hPx, uri.toString(), false, title)
+                positionAndSetupGsyPlayer(xPx, yPx, wPx, hPx, uri.toString(), false, finalTitle)
             }
         }
 
@@ -673,6 +679,17 @@ class MainActivity : AppCompatActivity() {
         gsyPlayer.layoutParams = params
         gsyPlayer.visibility = View.VISIBLE
 
+        // Reset GSY's 2000ms anti-churn guard before switching episodes. After a
+        // fullscreen round-trip, resolveNormalVideoShow() stamps mSaveChangeViewTIme to
+        // "now", so the first setUp() for a new episode within 2s returns false — leaving
+        // mUrl pointing at the OLD episode and the subsequent startPlayLogic() re-prepares
+        // that stale URL ("first click doesn't switch" bug). releaseAllVideos() calls
+        // onCompletion() on the current listener, which zeroes mSaveChangeViewTIme and
+        // detaches the listener, so isCurrentMediaListener() is false and setUp() always
+        // applies the new URL.
+        gsyPlayer.onVideoPause()
+        GSYVideoManager.releaseAllVideos()
+
         gsyPlayer.setUp(url, isLive, title)
         gsyPlayer.startPlayLogic()
 
@@ -737,11 +754,15 @@ class MainActivity : AppCompatActivity() {
         // Fullscreen entry/exit is handled natively by startWindowFullscreen /
         // clearFullscreenLayout — state is preserved in GSYVideoManager automatically.
         if (::gsyPlayer.isInitialized && gsyPlayer.visibility == View.VISIBLE) {
-            gsyPlayer.onVideoResume()  // restores saved position and resumes playback
-            // Re-pause if the user had manually paused before backgrounding, so the
-            // EXACT state is restored: paused stays paused, playing resumes.
-            if (!wasPlayingBeforeBackground) {
-                gsyPlayer.postDelayed({ gsyPlayer.onVideoPause() }, 100)
+            if (wasPlayingBeforeBackground) {
+                gsyPlayer.onVideoResume()  // restores saved position and resumes playback
+            } else {
+                // User had manually paused before backgrounding — restore the paused
+                // position WITHOUT starting playback. onVideoResume() always starts when
+                // state==5, so a resume-then-repause would cause a ~100ms play flash /
+                // audio blip; instead seek while paused and keep it paused.
+                gsyPlayer.seekTo(gsyPlayer.currentPositionWhenPlaying)
+                gsyPlayer.onVideoPause()
             }
         }
 
@@ -761,7 +782,11 @@ class MainActivity : AppCompatActivity() {
         // mCurrentPosition). Without this the video keeps playing in the background and
         // the position is never saved, so onResume's onVideoResume() is a no-op.
         if (::gsyPlayer.isInitialized) {
-            wasPlayingBeforeBackground = gsyPlayer.isInPlayingState
+            // isInPlayingState() returns TRUE even for PAUSE state (5) — it really means
+            // "not idle/completed/error". Use the raw state so a manually-paused player is
+            // NOT misclassified as "was playing".
+            val state = gsyPlayer.currentState
+            wasPlayingBeforeBackground = (state == 2 || state == 3)  // PLAYING / BUFFERING_PLAYING
             gsyPlayer.onVideoPause()
         }
     }

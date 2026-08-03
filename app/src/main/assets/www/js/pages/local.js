@@ -210,9 +210,13 @@ function openLocalDetail(fileItem, index) {
         }).catch(function() {});
     }
 
+    // Title reflects the episode the user tapped (episodes share one detail page but
+    // each row is a separate file). playEpisode() updates the visible title per switch.
+    var tappedEpTitle = (episodes[currentEp - 1] && episodes[currentEp - 1].name) ? episodes[currentEp - 1].name : fileItem.name;
+
     window.currentDetail = {
         videoId: 0,
-        title: fileItem.name,
+        title: tappedEpTitle,
         coverUrl: coverUrl,
         description: '本地文件' + (fileItem.size ? ' · ' + fileItem.size : ''),
         tags: ['本地'],

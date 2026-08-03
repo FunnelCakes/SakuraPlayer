@@ -121,6 +121,20 @@ function playEpisode(epIndex) {
     if (!window.currentDetail) return;
     window.playerState.currentEp = epIndex;
 
+    // Update the visible page title to the currently playing episode. renderDetail()
+    // only writes #detail-title / #d-title once at page open, so switching episodes
+    // left a stale title. Local details have no stable series title (currentDetail.title
+    // is the first file's name), so show the episode name itself; online details keep
+    // the series title with the episode name appended.
+    var ep = window.currentDetail.episodes && window.currentDetail.episodes.find(function(e) { return e.index === epIndex; });
+    var epTitle = (ep && ep.name) ? ep.name : ('第' + epIndex + '集');
+    var baseTitle = window.currentDetail.title || '';
+    var displayTitle = window.currentDetail.isLocal
+        ? epTitle
+        : (baseTitle ? baseTitle + ' - ' + epTitle : epTitle);
+    $('#detail-title').textContent = displayTitle;
+    $('#d-title').textContent = displayTitle;
+
     // Highlight active episode
     $$('#episode-grid .ep-btn').forEach(b => b.classList.toggle('playing', parseInt(b.dataset.ep) === epIndex));
 
@@ -152,16 +166,18 @@ function playEpisode(epIndex) {
     if (window.currentDetail.isLocal) {
         const ep = window.currentDetail.episodes?.find(e => e.index === epIndex);
         if (ep && ep.path) {
-            // Use GSY inline player for local files
-            window.Sakura.playLocalInline(ep.path, '[]', xPx, yPx, wPx, hPx);
+            // Use GSY inline player for local files. Pass the episode title so the GSY
+            // player's internal title (if ever surfaced) reflects the current episode.
+            window.Sakura.playLocalInline(ep.path, '[]', xPx, yPx, wPx, hPx, epTitle);
             $('#player-loading').style.display = 'none';
         } else {
             showToast('找不到本地文件');
             $('#player-loading').style.display = 'none';
         }
     } else {
-        // Online streaming: use GSY inline player
-        window.Sakura.playOnlineInline(window.currentDetail.videoId, window.currentDetail.title, epIndex, '[]', xPx, yPx, wPx, hPx);
+        // Online streaming: use GSY inline player. Pass displayTitle so the GSY player's
+        // internal title reflects the current episode.
+        window.Sakura.playOnlineInline(window.currentDetail.videoId, displayTitle, epIndex, '[]', xPx, yPx, wPx, hPx);
         // Loading indicator hidden when GSY starts playing (handled by GSY itself)
         setTimeout(function() { $('#player-loading').style.display = 'none'; }, 3000);
     }
