@@ -18,7 +18,7 @@
     <application
         android:allowBackup="false"
         android:icon="@drawable/ic_launcher_foreground"
-        android:label="樱花动漫"
+        android:label="樱花播放器"
         android:theme="@style/Theme.SakuraPlayer"
         android:networkSecurityConfig="@xml/network_security_config"
         android:requestLegacyExternalStorage="true"
