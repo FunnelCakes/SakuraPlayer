@@ -714,8 +714,8 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread { safPickerLauncher.launch(null) }
         }
         @JavascriptInterface fun refreshDomain() { runOnUiThread { bridge.refreshDomain() } }
-        @JavascriptInterface fun getDiscover(page: Int, callbackId: String) {
-            runOnUiThread { bridge.getDiscover(page, callbackId) }
+        @JavascriptInterface fun getDiscover(category: String, page: Int, callbackId: String) {
+            runOnUiThread { bridge.getDiscover(category, page, callbackId) }
         }
     }
 

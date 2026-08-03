@@ -5,6 +5,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.Request
 import org.jsoup.Jsoup
+import org.jsoup.nodes.Document
 
 data class AnimeResult(
     val videoId: Long,
@@ -186,22 +187,46 @@ object AnimeScraper {
             HttpClient.browserHeaders(domain + "/").forEach { (k, v) -> reqBuilder.header(k, v) }
             val html = HttpClient.client.newCall(reqBuilder.build()).execute().use { it.body?.string() ?: return@withContext emptyList<AnimeResult>() }
             val doc = Jsoup.parse(html)
-
-            doc.select(".stui-vodlist__box").forEach { item ->
-                val linkEl = item.selectFirst("a.stui-vodlist__thumb")
-                val titleEl = item.selectFirst(".title a")
-                val href = linkEl?.attr("href") ?: return@forEach
-                val videoId = extractId(href) ?: return@forEach
-                val cover = linkEl.attr("data-original").ifEmpty { linkEl.attr("src") }
-                results.add(AnimeResult(
-                    videoId = videoId,
-                    title = titleEl?.text()?.trim() ?: linkEl.attr("title"),
-                    coverUrl = if (cover.startsWith("http")) cover else "$domain$cover",
-                    episodeInfo = item.select(".pic-text").text().trim()
-                ))
-            }
+            results.addAll(parseCardList(doc, domain))
         } catch (_: Exception) {}
         results
+    }
+
+    /**
+     * Fetch a category-specific list from an AppleCMS type page.
+     * Category IDs on the source site: recommend handled by getHomeRecommend,
+     * 20 = 日本动漫, 21 = 国产动漫, 22 = 欧美动漫, 23 = 动漫电影.
+     */
+    suspend fun getCategoryList(domain: String, catId: String, page: Int): List<AnimeResult> = withContext(Dispatchers.IO) {
+        val results = mutableListOf<AnimeResult>()
+        try {
+            val url = "$domain/index.php/vod/type/id/$catId/page/$page.html"
+            val reqBuilder = Request.Builder().url(url).get()
+            HttpClient.browserHeaders(domain + "/").forEach { (k, v) -> reqBuilder.header(k, v) }
+            val html = HttpClient.client.newCall(reqBuilder.build()).execute().use { it.body?.string() ?: return@withContext emptyList<AnimeResult>() }
+            val doc = Jsoup.parse(html)
+            results.addAll(parseCardList(doc, domain))
+        } catch (_: Exception) {}
+        results
+    }
+
+    /** Shared AppleCMS card-grid parsing (.stui-vodlist__box), used by home & category pages. */
+    private fun parseCardList(doc: Document, domain: String): List<AnimeResult> {
+        val results = mutableListOf<AnimeResult>()
+        doc.select(".stui-vodlist__box").forEach { item ->
+            val linkEl = item.selectFirst("a.stui-vodlist__thumb")
+            val titleEl = item.selectFirst(".title a")
+            val href = linkEl?.attr("href") ?: return@forEach
+            val videoId = extractId(href) ?: return@forEach
+            val cover = linkEl.attr("data-original").ifEmpty { linkEl.attr("src") }
+            results.add(AnimeResult(
+                videoId = videoId,
+                title = titleEl?.text()?.trim() ?: linkEl.attr("title"),
+                coverUrl = if (cover.startsWith("http")) cover else "$domain$cover",
+                episodeInfo = item.select(".pic-text").text().trim()
+            ))
+        }
+        return results
     }
 
     private fun extractId(href: String): Long? {

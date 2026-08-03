@@ -18,7 +18,7 @@ const tabOverlayStack = { home: [], discover: [], download: [], me: [] };
 // Per-tab data cache: preserve content across tab switches
 const tabCache = {
     home: { loaded: false, homeTab: 'local', localHTML: '', followHTML: '', scrollTop: 0 },
-    discover: { loaded: false, items: [], cat: 'recommend', scrollTop: 0 },
+    discover: { loaded: false, cats: {}, cat: 'recommend', scrollTop: 0 },
     download: { loaded: false, tasks: [], scrollTop: 0 },
     me: { loaded: true, scrollTop: 0 }
 };
@@ -295,6 +295,7 @@ function showAbout() {
 // ==================== Discover Page ====================
 
 let discoverCat = 'recommend';
+let discoverReqId = 0;
 $$('.dcat').forEach(d => {
     d.addEventListener('click', () => {
         discoverCat = d.dataset.cat;
@@ -305,19 +306,26 @@ $$('.dcat').forEach(d => {
 
 async function loadDiscover() {
     const cache = tabCache.discover;
+    const cat = discoverCat;
+    const reqId = ++discoverReqId;
+    // Per-category cache: each filter keeps its own items
+    const catCache = cache.cats[cat] || (cache.cats[cat] = { items: [] });
     // Re-render from cache instantly
-    if (cache.items.length > 0) {
-        $('#discover-grid').innerHTML = cache.items.map(renderCard).join('');
+    if (catCache.items.length > 0) {
+        $('#discover-grid').innerHTML = catCache.items.map(renderCard).join('');
     } else {
+        $('#discover-grid').innerHTML = '';
         $('#discover-loading').style.display = '';
     }
-    // Then refresh from network
+    // Then refresh from network (category-specific)
     try {
-        const data = await callNativeLegacy('getDiscover', 1);
-        cache.items = (Array.isArray(data) ? data : []).map(r => ({...r, isLocal: false}));
-        $('#discover-grid').innerHTML = cache.items.map(renderCard).join('');
+        const data = await callNativeLegacy('getDiscover', cat, 1);
+        if (reqId !== discoverReqId) return; // stale response, ignore
+        catCache.items = (Array.isArray(data) ? data : []).map(r => ({...r, isLocal: false}));
+        $('#discover-grid').innerHTML = catCache.items.map(renderCard).join('');
     } catch(e) {
-        if (cache.items.length === 0) handleApiError(e);
+        if (reqId !== discoverReqId) return;
+        if (catCache.items.length === 0) handleApiError(e);
     }
     $('#discover-loading').style.display = 'none';
 }

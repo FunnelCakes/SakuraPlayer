@@ -768,10 +768,14 @@ class JsBridge(private val ctx: Context) {
 
     // ==================== Discover ====================
 
-    fun getDiscover(page: Int, callback: String) {
+    fun getDiscover(category: String, page: Int, callback: String) {
         scope.launch {
             try {
-                val results = AnimeScraper.getHomeRecommend(domain)
+                val results = if (category == "recommend" || category.isBlank()) {
+                    AnimeScraper.getHomeRecommend(domain)
+                } else {
+                    AnimeScraper.getCategoryList(domain, category, page)
+                }
                 val json = JSONArray()
                 results.forEach { json.put(it.toJson()) }
                 evalJs("$callback(null, $json)")

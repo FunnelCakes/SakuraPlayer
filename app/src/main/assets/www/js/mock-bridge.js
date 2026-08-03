@@ -75,15 +75,18 @@ window.Sakura = {
         ];
         setTimeout(() => window[cb](null, JSON.stringify(mock)), 200);
     },
-    getDiscover: function(page, cb) {
-        const mock = [
-            { videoId: 10, title: "正后方的神威", coverUrl: "", episodeInfo: "更新至第1集", isLocal: false },
-            { videoId: 11, title: "魔法少女奈叶 2026", coverUrl: "", episodeInfo: "更新至第1集", isLocal: false },
-            { videoId: 12, title: "关于我转生变成史莱姆这档事 第四季", coverUrl: "", episodeInfo: "更新至第1集", isLocal: false },
-            { videoId: 13, title: "岩本前辈的推荐", coverUrl: "", episodeInfo: "更新至第1集", isLocal: false },
-            { videoId: 14, title: "描绘直至生命尽头", coverUrl: "", episodeInfo: "更新至第1集", isLocal: false },
-            { videoId: 15, title: "入间同学入魔了 第四季", coverUrl: "", episodeInfo: "更新至第1集", isLocal: false },
-        ];
+    getDiscover: function(cat, page, cb) {
+        const titleByCat = {
+            'recommend': ["正后方的神威", "魔法少女奈叶 2026", "关于我转生变成史莱姆这档事 第四季"],
+            '20': ["咒术回战", "鬼灭之刃", "进击的巨人 最终季"],
+            '21': ["斗破苍穹", "完美世界", "仙逆"],
+            '22': ["咒术回战 剧场版", "间谍过家家", "鬼灭之刃 无限列车篇"],
+            '23': ["你的名字。", "天气之子", "铃芽之旅"]
+        };
+        const titles = titleByCat[cat] || titleByCat['recommend'];
+        const mock = titles.map((t, i) => ({
+            videoId: 10 + i, title: t, coverUrl: "", episodeInfo: "更新至第1集", isLocal: false
+        }));
         setTimeout(() => window[cb](null, JSON.stringify(mock)), 300);
     },
     getSettings: function(cb) {
