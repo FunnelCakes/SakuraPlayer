@@ -204,6 +204,71 @@ class SakuraGSYVideoPlayer : StandardGSYVideoPlayer {
         super.touchSurfaceUp()
     }
 
+    // ==================== Top-edge status bar reserve ====================
+
+    /**
+     * Pixels reserved at the top of the SCREEN for the system status-bar swipe.
+     *
+     * Touches that START inside this strip are passed through to the system
+     * instead of being consumed by GSY's GestureDetector, which would otherwise
+     * turn a status-bar pull-down into a brightness/volume/seek gesture. This is
+     * what B站 does by reserving the top ~100px of the screen.
+     */
+    private val statusBarReservePx: Int by lazy {
+        // Read the real status-bar height (may be tall on notch/cutout devices).
+        val statusBarHeight = try {
+            val resId = resources.getIdentifier("status_bar_height", "dimen", "android")
+            if (resId > 0) resources.getDimensionPixelSize(resId) else 0
+        } catch (e: Exception) {
+            0
+        }
+        // Reserve the status bar plus a comfortable margin (>= 60dp) so the
+        // top-edge swipe reliably wins over GSY's gesture detector.
+        maxOf(statusBarHeight + dp(16), dp(60))
+    }
+
+    /**
+     * Pass touches that start in the screen's top status-bar strip through to
+     * the system so the notification shade / status bar can be pulled down
+     * (mainly in fullscreen).
+     *
+     * rawY is screen-absolute, so this only reserves the real top of the screen:
+     * in inline mode the player is usually not at the screen top, so normal GSY
+     * gestures keep working everywhere on the inline surface.
+     */
+    override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+        if (ev.action == MotionEvent.ACTION_DOWN &&
+            ev.rawY < statusBarReservePx &&
+            !isTopControlAt(ev.x, ev.y)
+        ) {
+            return false
+        }
+        return super.dispatchTouchEvent(ev)
+    }
+
+    /**
+     * True when (x, y) -- player-local coordinates -- lands on a tappable top
+     * control that must keep working (the fullscreen back button and the lock
+     * button), so reserving the top strip does not break them.
+     */
+    private fun isTopControlAt(x: Float, y: Float): Boolean {
+        val controls = listOfNotNull<View>(mBackButton, mLockScreen)
+        if (controls.isEmpty()) return false
+        val playerLoc = IntArray(2)
+        getLocationInWindow(playerLoc)
+        for (c in controls) {
+            if (c.visibility != View.VISIBLE) continue
+            val loc = IntArray(2)
+            c.getLocationInWindow(loc)
+            val left = loc[0] - playerLoc[0]
+            val top = loc[1] - playerLoc[1]
+            if (x >= left && x <= left + c.width && y >= top && y <= top + c.height) {
+                return true
+            }
+        }
+        return false
+    }
+
     // ==================== Speed selector ====================
 
     private fun cycleSpeed() {
