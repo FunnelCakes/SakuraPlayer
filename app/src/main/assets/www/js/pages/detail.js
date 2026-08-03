@@ -168,7 +168,9 @@ function playEpisode(epIndex) {
         if (ep && ep.path) {
             // Use GSY inline player for local files. Pass the episode title so the GSY
             // player's internal title (if ever surfaced) reflects the current episode.
-            window.Sakura.playLocalInline(ep.path, '[]', xPx, yPx, wPx, hPx, epTitle);
+            // Pass the real episode list (with paths) so prev/next/selector work natively.
+            var leps = (window.currentDetail.episodes || []).map(function(e) { return {index: e.index, name: e.name, path: e.path || ''}; });
+            window.Sakura.playLocalInline(ep.path, JSON.stringify(leps), xPx, yPx, wPx, hPx, epTitle);
             $('#player-loading').style.display = 'none';
         } else {
             showToast('找不到本地文件');
@@ -177,7 +179,9 @@ function playEpisode(epIndex) {
     } else {
         // Online streaming: use GSY inline player. Pass displayTitle so the GSY player's
         // internal title reflects the current episode.
-        window.Sakura.playOnlineInline(window.currentDetail.videoId, displayTitle, epIndex, '[]', xPx, yPx, wPx, hPx);
+        // Pass the real episode list so prev/next/selector work natively.
+        var eps = (window.currentDetail.episodes || []).map(function(e) { return {index: e.index, name: e.name}; });
+        window.Sakura.playOnlineInline(window.currentDetail.videoId, displayTitle, epIndex, JSON.stringify(eps), xPx, yPx, wPx, hPx);
         // Loading indicator hidden when GSY starts playing (handled by GSY itself)
         setTimeout(function() { $('#player-loading').style.display = 'none'; }, 3000);
     }

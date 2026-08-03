@@ -35,8 +35,11 @@ import com.sakura.player.download.DownloadManager
 import com.sakura.player.follow.FollowManager
 import com.sakura.player.follow.UpdateChecker
 import com.shuyu.gsyvideoplayer.GSYVideoManager
-import com.shuyu.gsyvideoplayer.video.StandardGSYVideoPlayer
+import com.sakura.player.player.EpisodeNav
+import com.sakura.player.player.PlayerEpisode
+import com.sakura.player.player.SakuraGSYVideoPlayer
 import kotlinx.coroutines.*
+import org.json.JSONArray
 import java.io.File
 
 class MainActivity : AppCompatActivity() {
@@ -51,7 +54,7 @@ class MainActivity : AppCompatActivity() {
     @Volatile private var cachedPlayerState: String = "{}"
 
     // GSYVideoPlayer for inline (half-screen) playback
-    private lateinit var gsyPlayer: StandardGSYVideoPlayer
+    private lateinit var gsyPlayer: SakuraGSYVideoPlayer
 
     // Whether the inline player was playing (vs. user-paused) before the app went to
     // background. Used in onResume() to restore the EXACT state: paused stays paused,
@@ -219,7 +222,7 @@ class MainActivity : AppCompatActivity() {
             setBackgroundColor(0xFF000000.toInt())
         }
         // Create GSYVideoPlayer for inline playback (half-screen)
-        gsyPlayer = StandardGSYVideoPlayer(this).apply {
+        gsyPlayer = SakuraGSYVideoPlayer(this).apply {
             id = View.generateViewId()
             visibility = View.GONE
             setIsTouchWiget(true)
@@ -236,6 +239,19 @@ class MainActivity : AppCompatActivity() {
             // steals audio focus while this app is backgrounded. Instead GSY takes the
             // safe branch and pauses via listener().onVideoPause(), preserving position.
             setReleaseWhenLossAudio(false)
+            // Show the native lock button in fullscreen (GSY default is false).
+            setNeedLockFull(true)
+            // Keep the JS playerState.locked flag in sync when the user locks.
+            setLockClickListener { _, locked ->
+                evalJs("if(window.playerState)window.playerState.locked = $locked")
+                Toast.makeText(this@MainActivity, if (locked) "已锁定" else "已解锁", Toast.LENGTH_SHORT).show()
+            }
+        }
+
+        // Wire prev/next/select-episode navigation from the custom control bar.
+        // The fullscreen clone receives this callback via cloneParams().
+        gsyPlayer.onEpisodeNav = { nav, requestedIndex ->
+            handleGsyEpisodeNav(nav, requestedIndex)
         }
 
         // Disable mobile data warning dialog in GSYVideoPlayer
@@ -575,6 +591,11 @@ class MainActivity : AppCompatActivity() {
         @JavascriptInterface fun playOnlineInline(videoId: Long, title: String, epIndex: Int,
                                                    episodesJson: String, xPx: Int, yPx: Int, wPx: Int, hPx: Int) {
             runOnUiThread {
+                // Store the real episode list (previously the JS always passed '[]').
+                gsyPlayer.episodeList = parseEpisodes(episodesJson)
+                gsyPlayer.currentEpIndex = epIndex
+                gsyPlayer.isLocal = false
+                gsyPlayer.currentVideoId = videoId
                 resolveJob?.cancel()  // cancel any previous m3u8 resolution
                 resolveJob = scope.launch {
                     val m3u8 = bridge.resolveM3u8Url(videoId, epIndex)
@@ -595,6 +616,13 @@ class MainActivity : AppCompatActivity() {
                     evalJs("if(window.showToast)window.showToast('文件不存在: $path')")
                     return@runOnUiThread
                 }
+                // Store the real episode list (previously the JS always passed '[]').
+                gsyPlayer.episodeList = parseEpisodes(episodesJson)
+                gsyPlayer.isLocal = true
+                gsyPlayer.currentVideoId = 0
+                gsyPlayer.currentEpIndex = gsyPlayer.episodeList
+                    .indexOfFirst { it.path == path }
+                    .let { if (it >= 0) gsyPlayer.episodeList[it].index else 1 }
                 val finalTitle = if (title.isBlank()) file.nameWithoutExtension else title
                 val uri = FileProvider.getUriForFile(this@MainActivity, "$packageName.fileprovider", file)
                 positionAndSetupGsyPlayer(xPx, yPx, wPx, hPx, uri.toString(), false, finalTitle)
@@ -711,6 +739,126 @@ class MainActivity : AppCompatActivity() {
         }, 300)
     }
 
+    // ==================== GSY Episode Navigation ====================
+
+    /**
+     * Handle prev/next/select-episode navigation from the custom control bar.
+     * Operates on the CURRENT player (inline or fullscreen clone) so playback
+     * switches in place without breaking the fullscreen window.
+     */
+    private fun handleGsyEpisodeNav(nav: EpisodeNav, requestedIndex: Int) {
+        val player = (gsyPlayer.getCurrentPlayer() as? SakuraGSYVideoPlayer) ?: gsyPlayer
+        val eps = player.episodeList
+        if (eps.isEmpty()) {
+            Toast.makeText(this, "暂无剧集列表", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val currentIdx = eps.indexOfFirst { it.index == player.currentEpIndex }.let { if (it < 0) 0 else it }
+        val target = when (nav) {
+            EpisodeNav.PREV -> (currentIdx - 1).coerceAtLeast(0)
+            EpisodeNav.NEXT -> (currentIdx + 1).coerceAtMost(eps.size - 1)
+            EpisodeNav.SELECT -> eps.indexOfFirst { it.index == requestedIndex }.let { if (it < 0) currentIdx else it }
+        }
+        if (nav == EpisodeNav.PREV && target == currentIdx) {
+            Toast.makeText(this, "已经是第一集", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (nav == EpisodeNav.NEXT && target == currentIdx) {
+            Toast.makeText(this, "已经是最后一集", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val ep = eps[target]
+        player.currentEpIndex = ep.index
+        switchGsyEpisode(player, ep)
+    }
+
+    /**
+     * Resolve and play [ep]: re-resolve m3u8 for online sources, re-play the
+     * file for local sources, operating on the given player instance.
+     */
+    private fun switchGsyEpisode(player: SakuraGSYVideoPlayer, ep: PlayerEpisode) {
+        val title = ep.name.ifBlank { "第${ep.index}集" }
+        if (player.isLocal) {
+            val file = File(ep.path)
+            if (!file.exists()) {
+                Toast.makeText(this, "文件不存在: ${ep.path}", Toast.LENGTH_SHORT).show()
+                return
+            }
+            val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
+            switchGsyToUrl(player, uri.toString(), false, title)
+        } else {
+            val videoId = player.currentVideoId
+            resolveJob?.cancel()
+            resolveJob = scope.launch {
+                val m3u8 = bridge.resolveM3u8Url(videoId, ep.index)
+                if (m3u8 == null) {
+                    evalJs("if(window.showToast)window.showToast('无法获取播放地址')")
+                    return@launch
+                }
+                switchGsyToUrl(player, m3u8, true, title)
+            }
+        }
+    }
+
+    /**
+     * Switch playback in place. The releaseAllVideos() call zeroes GSY's
+     * 2000ms anti-churn guard (same rationale as positionAndSetupGsyPlayer),
+     * so setUp() always applies the new URL.
+     */
+    private fun switchGsyToUrl(player: SakuraGSYVideoPlayer, url: String, isLive: Boolean, title: String) {
+        player.onVideoPause()
+        GSYVideoManager.releaseAllVideos()
+        player.setUp(url, isLive, title)
+        player.startPlayLogic()
+        updateGsyEpisodeUi(player)
+    }
+
+    /**
+     * Sync the JS detail page (current episode, title, grid highlight) with
+     * the episode that the native GSY player just switched to.
+     */
+    private fun updateGsyEpisodeUi(player: SakuraGSYVideoPlayer) {
+        val epIndex = player.currentEpIndex
+        evalJs("""
+            (function(){
+                if (window.playerState) window.playerState.currentEp = $epIndex;
+                if (window.currentDetail && window.currentDetail.episodes) {
+                    var ep = window.currentDetail.episodes.find(function(e){ return e.index === $epIndex; });
+                    var epName = (ep && ep.name) ? ep.name : '第${'$'}{epIndex}集';
+                    var base = window.currentDetail.title || '';
+                    var disp = window.currentDetail.isLocal ? epName : (base ? base + ' - ' + epName : epName);
+                    var dt = document.getElementById('detail-title'); if (dt) dt.textContent = disp;
+                    var d2 = document.getElementById('d-title'); if (d2) d2.textContent = disp;
+                }
+                var btns = document.querySelectorAll('#episode-grid .ep-btn');
+                btns.forEach(function(b){ b.classList.toggle('playing', parseInt(b.dataset.ep) === $epIndex); });
+                if (typeof window.onGsyEpisodeChanged === 'function') window.onGsyEpisodeChanged($epIndex);
+            })();
+        """.trimIndent())
+    }
+
+    /**
+     * Parse the episodes JSON array passed from JS into [PlayerEpisode]s.
+     */
+    private fun parseEpisodes(json: String): List<PlayerEpisode> {
+        if (json.isBlank() || json == "[]") return emptyList()
+        return try {
+            val arr = JSONArray(json)
+            (0 until arr.length()).map { i ->
+                val obj = arr.getJSONObject(i)
+                val idx = obj.optInt("index", i + 1)
+                PlayerEpisode(
+                    index = idx,
+                    name = obj.optString("name", "第${idx}集"),
+                    path = obj.optString("path", "")
+                )
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "parseEpisodes failed", e)
+            emptyList()
+        }
+    }
+
     // ==================== Helpers ====================
 
     /**
@@ -722,7 +870,7 @@ class MainActivity : AppCompatActivity() {
     private fun disableGsyNetworkWarning() {
         try {
             // Walk up the class hierarchy to find mNeedShowWifiTip
-            var cls: Class<*>? = StandardGSYVideoPlayer::class.java
+            var cls: Class<*>? = SakuraGSYVideoPlayer::class.java
             while (cls != null && cls != Any::class.java) {
                 try {
                     val field = cls.getDeclaredField("mNeedShowWifiTip")
