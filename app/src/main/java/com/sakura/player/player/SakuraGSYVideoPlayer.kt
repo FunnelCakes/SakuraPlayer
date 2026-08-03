@@ -2,16 +2,24 @@ package com.sakura.player.player
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.drawable.ColorDrawable
+import android.graphics.drawable.GradientDrawable
 import android.util.AttributeSet
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewGroup
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.PopupWindow
+import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import com.shuyu.gsyvideoplayer.video.StandardGSYVideoPlayer
 import com.shuyu.gsyvideoplayer.video.base.GSYBaseVideoPlayer
+import com.shuyu.gsyvideoplayer.video.base.GSYVideoPlayer
 
 /**
  * Direction of an episode navigation request fired by the control-bar buttons.
@@ -34,9 +42,11 @@ data class PlayerEpisode(
  *
  * 1. Long-press the video surface to play at 2x speed (released on finger-up).
  * 2. Fullscreen lock button (enabled via setNeedLockFull(true) in MainActivity).
- * 3. Prev / next episode buttons on the control bar.
- * 4. Playback-speed selector button that cycles presets and applies setSpeed().
- * 5. Episode selector button that opens a native dialog.
+ * 3. Prev / next episode buttons on the control bar (FULLSCREEN ONLY — hidden in
+ *    the inline / half-screen player via [updateControlsVisibility]).
+ * 4. Playback-speed selector button that opens a GSY-styled popup menu of presets
+ *    and applies setSpeed() (visible in both inline and fullscreen).
+ * 5. Episode selector button that opens a GSY-styled popup menu (FULLSCREEN ONLY).
  *
  * The (Context, Boolean) constructor is REQUIRED: GSY instantiates the
  * fullscreen clone via reflection (getConstructor(Context.class, Boolean.class)).
@@ -102,7 +112,9 @@ class SakuraGSYVideoPlayer : StandardGSYVideoPlayer {
 
     /**
      * Build the speed / prev / next / episode-selector buttons and add them to
-     * the bottom control bar (just before the fullscreen button).
+     * the bottom control bar (just before the fullscreen button). Prev / next /
+     * episode are only relevant in fullscreen, so their visibility is applied by
+     * [updateControlsVisibility] (they stay hidden in the inline half-screen bar).
      */
     private fun addCustomControls() {
         if (controlsAdded) return
@@ -140,7 +152,7 @@ class SakuraGSYVideoPlayer : StandardGSYVideoPlayer {
                 setPadding(dp(10), 0, dp(10), 0)
                 isClickable = true
                 isFocusable = true
-                setOnClickListener { cycleSpeed() }
+                setOnClickListener { showSpeedMenu() }
             }
 
             episodeBtn = TextView(ctx).apply {
@@ -166,10 +178,54 @@ class SakuraGSYVideoPlayer : StandardGSYVideoPlayer {
             bottom.addView(nextBtn, insertIndex + 1, lp)
             bottom.addView(speedBtn, insertIndex + 2, lp)
             bottom.addView(episodeBtn, insertIndex + 3, lp)
+
+            updateControlsVisibility()
         } catch (e: Exception) {
             // Never crash the player if the standard layout changes underneath us.
             e.printStackTrace()
         }
+    }
+
+    /**
+     * Show prev / next / episode-selector ONLY in the fullscreen clone, and keep
+     * the speed selector visible in both inline and fullscreen. GSY's
+     * [isIfCurrentIsFullscreen] is true on the fullscreen window and false on the
+     * inline (half-screen) player, so hiding is driven by that flag.
+     *
+     * Called from [addCustomControls] for the initial state, from
+     * [setStateAndUi] on every UI-state transition, and from
+     * [resolveNormalVideoShow] AFTER the flag flips back to false on fullscreen
+     * exit (so the inline player re-hides its fullscreen-only buttons).
+     */
+    private fun updateControlsVisibility() {
+        val isFullscreen = isIfCurrentIsFullscreen()
+        prevBtn?.visibility = if (isFullscreen) View.VISIBLE else View.GONE
+        nextBtn?.visibility = if (isFullscreen) View.VISIBLE else View.GONE
+        episodeBtn?.visibility = if (isFullscreen) View.VISIBLE else View.GONE
+        speedBtn?.visibility = View.VISIBLE
+    }
+
+    // ==================== UI state / fullscreen hooks ====================
+
+    /**
+     * Refresh fullscreen-only button visibility on every UI-state transition
+     * (GSY calls this on prepare/play/pause/complete/error and on fullscreen
+     * enter/exit). Safe to call before controls exist.
+     */
+    override fun setStateAndUi(state: Int) {
+        super.setStateAndUi(state)
+        updateControlsVisibility()
+    }
+
+    /**
+     * GSY calls this on the inline player when leaving fullscreen. The base
+     * implementation flips [mIfCurrentIsFullscreen] to false at the very end, so
+     * we refresh our button visibility AFTER calling super to re-hide the
+     * fullscreen-only prev/next/episode controls.
+     */
+    override fun resolveNormalVideoShow(oldF: View?, vp: ViewGroup?, gsyVideoPlayer: GSYVideoPlayer?) {
+        super.resolveNormalVideoShow(oldF, vp, gsyVideoPlayer)
+        updateControlsVisibility()
     }
 
     // ==================== Long-press 2x speed ====================
@@ -271,13 +327,28 @@ class SakuraGSYVideoPlayer : StandardGSYVideoPlayer {
 
     // ==================== Speed selector ====================
 
-    private fun cycleSpeed() {
+    /**
+     * Open the GSY-styled popup menu listing every speed preset. The current
+     * speed is highlighted; selecting a preset applies it via setSpeed() and
+     * closes the menu. Works in both inline and fullscreen (this button is kept
+     * visible in the inline bar — see [updateControlsVisibility]).
+     */
+    private fun showSpeedMenu() {
+        val ctx = context ?: return
+        val anchor = speedBtn ?: return
         val cur = getSpeed().coerceIn(0.25f, 3f)
         val idx = nearestPresetIndex(cur)
-        val next = speedPresets[(idx + 1) % speedPresets.size]
-        setSpeed(next)
-        updateSpeedBtn()
-        Toast.makeText(context, "倍速 ${formatSpeed(next)}", Toast.LENGTH_SHORT).show()
+        showGsyDropdown(
+            anchor = anchor,
+            title = "播放速度",
+            items = speedPresets.map { formatSpeed(it) },
+            currentIndex = idx
+        ) { which ->
+            val speed = speedPresets[which]
+            setSpeed(speed)
+            updateSpeedBtn()
+            Toast.makeText(ctx, "倍速 ${formatSpeed(speed)}", Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun nearestPresetIndex(speed: Float): Int {
@@ -307,27 +378,188 @@ class SakuraGSYVideoPlayer : StandardGSYVideoPlayer {
 
     // ==================== Episode selector ====================
 
+    /**
+     * Open the GSY-styled popup menu listing every episode from [episodeList].
+     * The current episode is highlighted; selecting one switches playback via the
+     * existing [EpisodeNav.SELECT] path and closes the menu. The episode button is
+     * only visible in fullscreen (see [updateControlsVisibility]), but the menu
+     * itself works on either instance.
+     */
     private fun showEpisodeDialog() {
         val ctx = context ?: return
+        val anchor = episodeBtn ?: return
         if (episodeList.isEmpty()) {
             Toast.makeText(ctx, "暂无剧集列表", Toast.LENGTH_SHORT).show()
             return
         }
-        val names = episodeList.map { it.name.ifBlank { "第${it.index}集" } }.toTypedArray()
+        val names = episodeList.map { it.name.ifBlank { "第${it.index}集" } }
         val currentIdx = episodeList.indexOfFirst { it.index == currentEpIndex }.let { if (it < 0) 0 else it }
 
-        android.app.AlertDialog.Builder(ctx)
-            .setTitle("选集")
-            .setSingleChoiceItems(names, currentIdx) { dialog, which ->
-                dialog.dismiss()
-                if (which in episodeList.indices) {
-                    val ep = episodeList[which]
-                    currentEpIndex = ep.index
-                    onEpisodeNav?.invoke(EpisodeNav.SELECT, ep.index)
+        showGsyDropdown(
+            anchor = anchor,
+            title = "选集",
+            items = names,
+            currentIndex = currentIdx
+        ) { which ->
+            if (which in episodeList.indices) {
+                val ep = episodeList[which]
+                currentEpIndex = ep.index
+                onEpisodeNav?.invoke(EpisodeNav.SELECT, ep.index)
+            }
+        }
+    }
+
+    // ==================== GSY-styled popup menus ====================
+
+    /** B站 / GSY pink accent used to highlight the currently-selected menu row. */
+    private val accentPink: Int = 0xFFFB7299.toInt()
+
+    /** The single currently-visible dropdown menu (speed or episode). */
+    private var activeMenu: PopupWindow? = null
+
+    private fun dismissActiveMenu() {
+        activeMenu?.let { popup ->
+            if (popup.isShowing) popup.dismiss()
+        }
+        activeMenu = null
+    }
+
+    /**
+     * Show a GSY-consistent dropdown menu anchored immediately ABOVE [anchor] (the
+     * tapped control-bar button), like the B站 / YouTube player settings dropdowns.
+     * The panel is a semi-transparent dark rounded card with a bold title, white
+     * rows, and the current row highlighted in the B站 pink accent (#FB7299) with a
+     * subtle tinted background. Rows are scrollable so long episode lists stay
+     * on-screen. Selecting a row applies [onSelect] and closes the dropdown;
+     * tapping outside or pressing back also dismisses it.
+     */
+    private fun showGsyDropdown(
+        anchor: View,
+        title: String,
+        items: List<String>,
+        currentIndex: Int,
+        onSelect: (Int) -> Unit
+    ) {
+        val ctx = context ?: return
+        if (items.isEmpty()) return
+        dismissActiveMenu()
+
+        val content = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), dp(12), dp(12), dp(12))
+            background = roundedRectDrawable(0xF0242424.toInt(), dp(14).toFloat())
+        }
+
+        // Title header.
+        content.addView(TextView(ctx).apply {
+            text = title
+            textSize = 16f
+            setTypeface(typeface, Typeface.BOLD)
+            setTextColor(0xFFFFFFFF.toInt())
+            gravity = Gravity.CENTER
+            setPadding(0, dp(4), 0, dp(10))
+        })
+
+        // List rows (click listeners attached after the PopupWindow exists).
+        val list = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
+        items.forEachIndexed { index, label ->
+            val selected = index == currentIndex
+            val row = TextView(ctx).apply {
+                text = label
+                textSize = 15f
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(24), dp(12), dp(24), dp(12))
+                isClickable = true
+                isFocusable = true
+                setTextColor(if (selected) accentPink else 0xFFFFFFFF.toInt())
+                setTypeface(typeface, if (selected) Typeface.BOLD else Typeface.NORMAL)
+                if (selected) {
+                    background = roundedRectDrawable(0x33FB7299.toInt(), dp(8).toFloat())
                 }
             }
-            .setNegativeButton("取消", null)
-            .show()
+            list.addView(
+                row,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                )
+            )
+        }
+        content.addView(
+            MaxHeightScrollView(ctx, dp(360)).apply { addView(list) },
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        )
+
+        val popupWidth = dp(280)
+        content.measure(
+            View.MeasureSpec.makeMeasureSpec(popupWidth, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
+        )
+        var popupHeight = content.measuredHeight
+        if (popupHeight <= 0) popupHeight = dp(200)
+
+        val popup = PopupWindow(content, popupWidth, popupHeight, true).apply {
+            isFocusable = true
+            isOutsideTouchable = true
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+        }
+
+        // Selecting a row applies it and closes the dropdown.
+        for (i in 0 until list.childCount) {
+            val row = list.getChildAt(i)
+            row.setOnClickListener {
+                popup.dismiss()
+                activeMenu = null
+                onSelect(i)
+            }
+        }
+
+        // showAtLocation positions in SCREEN coordinates (Gravity.TOP|LEFT means
+        // offsets from the screen's top-left), so pair it with getLocationOnScreen.
+        val anchorLoc = IntArray(2)
+        anchor.getLocationOnScreen(anchorLoc)
+
+        // Place the dropdown immediately ABOVE the button: the popup's bottom edge
+        // sits `gap` above the button's top, horizontally centered on the button.
+        val gap = dp(6)
+        var x = anchorLoc[0] + anchor.width / 2 - popupWidth / 2
+        var y = anchorLoc[1] - popupHeight - gap
+
+        // Keep it fully on-screen.
+        val screenWidth = ctx.resources.displayMetrics.widthPixels
+        val screenHeight = ctx.resources.displayMetrics.heightPixels
+        val margin = dp(8)
+        if (x < margin) x = margin
+        if (x + popupWidth > screenWidth - margin) x = screenWidth - popupWidth - margin
+        if (y < margin) y = margin
+        if (y + popupHeight > screenHeight - margin) y = screenHeight - popupHeight - margin
+
+        popup.showAtLocation(anchor, Gravity.TOP or Gravity.LEFT, x, y)
+        activeMenu = popup
+    }
+
+    /** Build a rounded-rectangle background drawable for the menu panel / rows. */
+    private fun roundedRectDrawable(color: Int, radiusPx: Float): GradientDrawable =
+        GradientDrawable().apply {
+            setColor(color)
+            cornerRadius = radiusPx
+        }
+
+    /**
+     * A [ScrollView] whose measured height is capped so a very long episode list
+     * cannot push the popup menu off-screen.
+     */
+    private inner class MaxHeightScrollView(
+        ctx: Context,
+        private val maxHeightPx: Int
+    ) : ScrollView(ctx) {
+        override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+            val limited = View.MeasureSpec.makeMeasureSpec(maxHeightPx, View.MeasureSpec.AT_MOST)
+            super.onMeasure(widthMeasureSpec, limited)
+        }
     }
 
     // ==================== Fullscreen clone params ====================
