@@ -2,15 +2,20 @@ package com.sakura.player.player
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
+import android.os.Build
 import android.util.AttributeSet
 import android.view.Gravity
 import android.view.MotionEvent
+import android.view.OrientationEventListener
+import android.view.Surface
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.PopupWindow
@@ -74,6 +79,103 @@ class SakuraGSYVideoPlayer : StandardGSYVideoPlayer {
     /** Callback fired when prev/next/select episode is requested. */
     var onEpisodeNav: ((EpisodeNav, Int) -> Unit)? = null
 
+    // ==================== Smart 180° flip ====================
+
+    /**
+     * Last device orientation (degrees) reported by [smartFlipListener], or -1 when unknown.
+     * Copied to the fullscreen clone via [cloneParams] so the flip applies immediately on
+     * fullscreen entry (before the clone's own sensor listener delivers its first reading).
+     */
+    private var lastDeviceOrientation: Int = -1
+
+    /** Orientation listener that drives the smart flip. Lazily created in [init]. */
+    private var smartFlipListener: OrientationEventListener? = null
+
+    /**
+     * Master switch for the smart flip. On by default. When disabled, any applied rotation
+     * is reset to 0. (Kept as a knob in case a host wants to defer to GSY's own orientation
+     * utils on some builds.)
+     */
+    private var smartFlipEnabled = true
+
+    /**
+     * Whether the user has locked the fullscreen controls via GSY's lock button
+     * ([GSYVideoControlView.mLockCurScreen]). The smart flip respects this: while locked,
+     * the rotation is never changed ("flip stays as-is").
+     */
+    fun isLocked(): Boolean = mLockCurScreen
+
+    /** Enable/disable the smart 180° flip. Disabling resets any applied rotation. */
+    fun setSmartFlipEnabled(enabled: Boolean) {
+        smartFlipEnabled = enabled
+        if (!enabled && rotation != 0f) {
+            rotation = 0f
+        }
+    }
+
+    /**
+     * Create the [OrientationEventListener] (once) and register it. Called from [init], so it
+     * runs on the inline player at app start and on the fullscreen clone when GSY instantiates
+     * it via reflection. The listener is disabled in [onDetachedFromWindow] to avoid leaks.
+     */
+    private fun initSmartFlip() {
+        if (smartFlipListener != null) return
+        val ctx = context ?: return
+        smartFlipListener = object : OrientationEventListener(ctx) {
+            override fun onOrientationChanged(orientation: Int) {
+                lastDeviceOrientation = orientation
+                updateSmartFlip(orientation)
+            }
+        }
+    }
+
+    /**
+     * Re-evaluate and apply the smart flip based on the current device orientation. Rotates
+     * this view (video surface + controls together) 180° when the phone is held upside-down
+     * in landscape fullscreen while unlocked, and back to 0° when upright.
+     */
+    private fun updateSmartFlip(deviceOrientation: Int) {
+        if (!smartFlipEnabled) return
+        val isLandscapeFullscreen = isIfCurrentIsFullscreen() &&
+            resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+        // Only query the display rotation when we actually need it (landscape fullscreen).
+        val displayRotationDegrees = if (isLandscapeFullscreen) currentDisplayRotationDegrees() else 0
+        val target = SmartFlipLogic.targetRotation(
+            deviceOrientationDegrees = deviceOrientation,
+            displayRotationDegrees = displayRotationDegrees,
+            isLandscapeFullscreen = isLandscapeFullscreen,
+            isLocked = isLocked(),
+            currentRotation = rotation
+        )
+        if (rotation != target) {
+            rotation = target
+        }
+    }
+
+    /**
+     * The display's current rotation mapped to degrees (0/90/180/270). Works across API 24+
+     * (pre-R uses WindowManager.defaultDisplay, R+ uses context.display).
+     */
+    private fun currentDisplayRotationDegrees(): Int {
+        val rotation = try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                context?.display?.rotation
+            } else {
+                @Suppress("DEPRECATION")
+                (context?.getSystemService(Context.WINDOW_SERVICE) as? WindowManager)
+                    ?.defaultDisplay?.rotation
+            }
+        } catch (e: Exception) {
+            Surface.ROTATION_0
+        }
+        return when (rotation) {
+            Surface.ROTATION_90 -> 90
+            Surface.ROTATION_180 -> 180
+            Surface.ROTATION_270 -> 270
+            else -> 0
+        }
+    }
+
     // ==================== Long-press 2x speed ====================
 
     private var longPressSpeedActive = false
@@ -108,6 +210,7 @@ class SakuraGSYVideoPlayer : StandardGSYVideoPlayer {
     override fun init(context: Context) {
         super.init(context)
         addCustomControls()
+        initSmartFlip()
     }
 
     /**
@@ -203,6 +306,11 @@ class SakuraGSYVideoPlayer : StandardGSYVideoPlayer {
         nextBtn?.visibility = if (isFullscreen) View.VISIBLE else View.GONE
         episodeBtn?.visibility = if (isFullscreen) View.VISIBLE else View.GONE
         speedBtn?.visibility = View.VISIBLE
+
+        // Fullscreen enter/exit flows through setStateAndUi / resolveNormalVideoShow which call
+        // this method. Re-evaluate the smart flip here so the rotation applies immediately when
+        // the player goes fullscreen (using the last known orientation) and resets on exit.
+        updateSmartFlip(lastDeviceOrientation)
     }
 
     // ==================== UI state / fullscreen hooks ====================
@@ -229,6 +337,17 @@ class SakuraGSYVideoPlayer : StandardGSYVideoPlayer {
     }
 
     // ==================== Long-press 2x speed ====================
+
+    /**
+     * Re-evaluate the smart flip the moment the user toggles the lock button, so unlocking
+     * while the phone is upside-down engages the flip right away (and locking freezes it at
+     * the current rotation). GSY's base implementation flips [mLockCurScreen] and updates the
+     * lock icon; we hook AFTER it so [updateSmartFlip] sees the new lock state.
+     */
+    override fun lockTouchLogic() {
+        super.lockTouchLogic()
+        updateSmartFlip(lastDeviceOrientation)
+    }
 
     /**
      * GSY calls this when the GestureDetector detects a long-press (gated by
@@ -293,7 +412,13 @@ class SakuraGSYVideoPlayer : StandardGSYVideoPlayer {
      * gestures keep working everywhere on the inline surface.
      */
     override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
-        if (ev.action == MotionEvent.ACTION_DOWN &&
+        // When the smart flip has rotated the whole view 180°, the control bar lands at the
+        // physical top of the screen. Skip the top status-bar reservation in that state so the
+        // flipped controls stay tappable (the notification shade is impractical to use while
+        // the phone is held upside-down anyway). Touch coordinates are otherwise transformed
+        // through the view's rotation by the framework, so gestures keep working as expected.
+        val flipped = rotation == SmartFlipLogic.ROTATION_FLIPPED
+        if (!flipped && ev.action == MotionEvent.ACTION_DOWN &&
             ev.rawY < statusBarReservePx &&
             !isTopControlAt(ev.x, ev.y)
         ) {
@@ -577,8 +702,24 @@ class SakuraGSYVideoPlayer : StandardGSYVideoPlayer {
             to.isLocal = from.isLocal
             to.currentVideoId = from.currentVideoId
             to.onEpisodeNav = from.onEpisodeNav
+            to.smartFlipEnabled = from.smartFlipEnabled
+            // Seed the clone with the inline player's last-known device orientation so the flip
+            // is applied immediately on fullscreen entry, before the clone's own sensor listener
+            // delivers its first reading.
+            to.lastDeviceOrientation = from.lastDeviceOrientation
+            to.updateSmartFlip(to.lastDeviceOrientation)
             to.updateSpeedBtn()
         }
+    }
+
+    /**
+     * Stop the orientation listener when this view is removed from the window. This covers the
+     * fullscreen clone (removed on fullscreen exit) and the inline player when the host activity
+     * is torn down.
+     */
+    override fun onDetachedFromWindow() {
+        super.onDetachedFromWindow()
+        smartFlipListener?.disable()
     }
 
     // ==================== Helpers ====================
