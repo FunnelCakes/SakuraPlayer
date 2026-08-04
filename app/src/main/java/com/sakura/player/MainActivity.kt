@@ -235,10 +235,29 @@ class MainActivity : AppCompatActivity() {
             visibility = View.GONE
             setIsTouchWiget(true)
             setIsTouchWigetFull(true)
-            // Force landscape rotation when entering fullscreen.
-            // GSY's resolveByClick() only triggers when isLockLand is true;
-            // without this, the screen stays in portrait on startWindowFullscreen().
+            // Use GSY's native OrientationUtils for the smart 180° flip. The custom
+            // view-rotation approach in SakuraGSYVideoPlayer was removed; GSY now rotates
+            // the whole ACTIVITY (video + UI together) between LANDSCAPE and
+            // REVERSE_LANDSCAPE via setRequestedOrientation(). The Manifest's
+            // configChanges="orientation|screenSize|..." keeps the activity alive across
+            // that rotation, so the fullscreen window survives and playback continues.
+            //
+            //  - setLockLand(true) makes resolveByClick() force landscape on fullscreen
+            //    entry (startWindowFullscreen() would otherwise stay portrait).
+            //  - setNeedOrientationUtils(true) (default) makes resolveFullVideoShow()
+            //    create the OrientationUtils for the fullscreen clone.
+            //  - setRotateViewAuto(true) (default) arms GSY's orientation sensor listener.
+            //  - setRotateWithSystem(false) makes GSY process the sensor even when the
+            //    SYSTEM auto-rotate setting is OFF, so the video flips 180° when the phone
+            //    is held upside-down in landscape regardless of that setting.
+            //  - setOnlyRotateLand(true) locks the activity to landscape (the sensor's
+            //    portrait branch is a no-op) while still flipping between LANDSCAPE and
+            //    REVERSE_LANDSCAPE as the device tilts.
             setLockLand(true)
+            setNeedOrientationUtils(true)
+            setRotateViewAuto(true)
+            setRotateWithSystem(false)
+            setOnlyRotateLand(true)
             // Hide title/back button for inline mode
             backButton.visibility = View.GONE
             titleTextView.visibility = View.GONE
