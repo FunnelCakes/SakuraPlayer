@@ -117,6 +117,9 @@ class SakuraGSYVideoPlayer : StandardGSYVideoPlayer {
      * Create the [OrientationEventListener] (once) and register it. Called from [init], so it
      * runs on the inline player at app start and on the fullscreen clone when GSY instantiates
      * it via reflection. The listener is disabled in [onDetachedFromWindow] to avoid leaks.
+     *
+     * NOTE: `enable()` is REQUIRED for [OrientationEventListener] to deliver callbacks — merely
+     * constructing it does nothing (the listener never fires, so the smart flip never engages).
      */
     private fun initSmartFlip() {
         if (smartFlipListener != null) return
@@ -127,6 +130,7 @@ class SakuraGSYVideoPlayer : StandardGSYVideoPlayer {
                 updateSmartFlip(orientation)
             }
         }
+        smartFlipListener?.enable()
     }
 
     /**
@@ -138,18 +142,54 @@ class SakuraGSYVideoPlayer : StandardGSYVideoPlayer {
         if (!smartFlipEnabled) return
         val isLandscapeFullscreen = isIfCurrentIsFullscreen() &&
             resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+        val locked = isLocked()
         // Only query the display rotation when we actually need it (landscape fullscreen).
         val displayRotationDegrees = if (isLandscapeFullscreen) currentDisplayRotationDegrees() else 0
         val target = SmartFlipLogic.targetRotation(
             deviceOrientationDegrees = deviceOrientation,
             displayRotationDegrees = displayRotationDegrees,
             isLandscapeFullscreen = isLandscapeFullscreen,
-            isLocked = isLocked(),
+            isLocked = locked,
             currentRotation = rotation
         )
         if (rotation != target) {
             rotation = target
         }
+    }
+
+    /**
+     * (Re-)start the orientation listener whenever the view is attached to a window. The
+     * listener is created in [init] but must be explicitly [OrientationEventListener.enable]d;
+     * re-attaching (e.g. the fullscreen clone being placed into the fullscreen window) needs a
+     * fresh enable, since [onDetachedFromWindow] disables it.
+     */
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        initSmartFlip()
+        smartFlipListener?.enable()
+    }
+
+    /**
+     * Re-evaluate the smart flip when the display orientation changes. The fullscreen entry path
+     * forces landscape via GSY's OrientationUtils *after* a delay, so the very first sensor
+     * callback can arrive while the activity is still portrait (isLandscapeFullscreen == false).
+     * Re-evaluating here ensures the flip engages the moment the display settles into landscape.
+     */
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        updateSmartFlip(lastDeviceOrientation)
+    }
+
+    /**
+     * Fallback re-evaluation hook: this view is always re-laid out when it becomes fullscreen and
+     * again when the display rotates to landscape, so the flip is re-evaluated even if the first
+     * sensor callback arrived before the activity settled into landscape (see
+     * [onConfigurationChanged] for the same reasoning). [updateSmartFlip] is idempotent and cheap,
+     * so running it on every layout pass is safe.
+     */
+    override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
+        super.onLayout(changed, left, top, right, bottom)
+        updateSmartFlip(lastDeviceOrientation)
     }
 
     /**
