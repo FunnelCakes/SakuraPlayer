@@ -1031,6 +1031,10 @@ class MainActivity : AppCompatActivity() {
             wasPlayingBeforeBackground = (state == 2 || state == 3)  // PLAYING / BUFFERING_PLAYING
             gsyPlayer.onVideoPause()
         }
+        // Belt-and-braces: Home / lock / call can tear down a mid-gesture touch with
+        // ACTION_CANCEL, and the seek bubble is a Dialog window that GSY only dismisses
+        // on ACTION_UP. Make sure no HUD dialog survives into the background.
+        dismissGsyHudDialogs()
     }
 
     override fun onStop() {
@@ -1041,6 +1045,25 @@ class MainActivity : AppCompatActivity() {
         if (::gsyPlayer.isInitialized) {
             gsyPlayer.onVideoPause()
         }
+        dismissGsyHudDialogs()
+    }
+
+    /**
+     * Belt-and-braces cleanup for the GSY HUD dialogs (seek bubble / volume /
+     * brightness) when the app is backgrounded. The seek bubble is a Dialog window
+     * that GSY only dismisses on surface ACTION_UP; backgrounding mid-gesture
+     * (Home / lock / call) cancels the touch instead, so the bubble would otherwise
+     * leak and re-show on resume. Reach the fullscreen clone too, because during
+     * fullscreen it — not the inline player — owns the visible bubble.
+     */
+    private fun dismissGsyHudDialogs() {
+        if (!::gsyPlayer.isInitialized) return
+        try { gsyPlayer.dismissGestureDialogs() } catch (_: Exception) {}
+        try {
+            (findViewById<ViewGroup>(android.R.id.content)
+                ?.findViewById<View>(GSYVideoManager.FULLSCREEN_ID) as? SakuraGSYVideoPlayer)
+                ?.dismissGestureDialogs()
+        } catch (_: Exception) {}
     }
 
     override fun onDestroy() {

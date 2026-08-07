@@ -293,6 +293,14 @@ class SakuraGSYVideoPlayer : StandardGSYVideoPlayer {
      * gestures keep working everywhere on the inline surface.
      */
     override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+        // An interrupted touch (physical back / home / lock / notification shade /
+        // incoming call / overlay) is torn down with ACTION_CANCEL and never reaches
+        // GSY's touchSurfaceUp(), so the HUD dialogs would otherwise leak. Dismiss
+        // them here, on the way out, for both the inline player and the fullscreen
+        // clone (whichever receives the cancelled touch).
+        if (ev.actionMasked == MotionEvent.ACTION_CANCEL) {
+            dismissGestureDialogs()
+        }
         if (ev.action == MotionEvent.ACTION_DOWN &&
             ev.rawY < statusBarReservePx &&
             !isTopControlAt(ev.x, ev.y)
@@ -323,6 +331,46 @@ class SakuraGSYVideoPlayer : StandardGSYVideoPlayer {
             }
         }
         return false
+    }
+
+    // ==================== HUD dialog cleanup (seek-bubble leak fix) ====================
+
+    /**
+     * Dismiss the seek-preview (progress), volume and brightness HUD dialogs if any
+     * are showing. GSY only dismisses these from touchSurfaceUp() on the surface
+     * container's ACTION_UP, so every other teardown path (detach, ACTION_CANCEL,
+     * activity pause) must call this to avoid leaking the seek bubble — a Dialog
+     * window owned by the Activity that outlives the player view. The three dismiss
+     * methods are protected on StandardGSYVideoPlayer and are no-ops when the
+     * corresponding dialog is null / not showing.
+     */
+    fun dismissGestureDialogs() {
+        try { dismissProgressDialog() } catch (_: Exception) {}
+        try { dismissVolumeDialog() } catch (_: Exception) {}
+        try { dismissBrightnessDialog() } catch (_: Exception) {}
+    }
+
+    /**
+     * GSY's own onDetachedFromWindow() dismisses the volume/brightness dialogs but
+     * omits the seek progress dialog. On fullscreen exit (physical back, back/shrink
+     * button, rotation) the fullscreen clone is removed from the window mid-gesture,
+     * so the seek bubble would otherwise survive the detach. Dismiss all three here
+     * before super runs its cleanup.
+     */
+    override fun onDetachedFromWindow() {
+        dismissGestureDialogs()
+        super.onDetachedFromWindow()
+    }
+
+    /**
+     * Belt-and-braces for the Home / lock / app-background path: MainActivity pauses
+     * the inline player on onPause/onStop. Dismissing the HUD dialogs here guarantees
+     * a mid-gesture bubble is not re-shown when the app resumes. (The fullscreen clone
+     * is additionally covered by MainActivity's own pause cleanup.)
+     */
+    override fun onVideoPause() {
+        dismissGestureDialogs()
+        super.onVideoPause()
     }
 
     // ==================== Speed selector ====================
