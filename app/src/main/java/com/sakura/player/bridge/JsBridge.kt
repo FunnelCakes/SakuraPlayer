@@ -9,6 +9,7 @@ import android.util.Log
 import android.webkit.JavascriptInterface
 import androidx.core.content.FileProvider
 import com.sakura.player.AnimeService
+import com.sakura.player.MainActivity
 import com.sakura.player.data.SettingsPrefs
 import com.sakura.player.download.DownloadManager
 import com.sakura.player.download.DownloadNotif
@@ -471,6 +472,17 @@ class JsBridge(private val ctx: Context) {
 
     // ==================== Download ====================
 
+    /**
+     * Prompt the user (once) to allow background running / battery-optimization
+     * exemption when a download is started. On Huawei/EMUI this is what lets the
+     * app escape fastHibernation freezes during long background download batches.
+     */
+    private fun maybePromptBatteryOptimization() {
+        scope.launch {
+            (ctx as? MainActivity)?.requestBatteryOptimizationExemptionIfNeeded()
+        }
+    }
+
     fun addDownload(videoId: Long, title: String, epIndex: Int, epName: String,
                     m3u8Url: String, coverUrl: String = "") {
         val safeTitle = title.replace(Regex("[/\\\\:*?\"<>|]"), "_")
@@ -486,6 +498,7 @@ class JsBridge(private val ctx: Context) {
             putExtra("action", "start")
         }
         ctx.startService(intent)
+        maybePromptBatteryOptimization()
     }
 
     fun addBatchDownload(itemsJson: String, coverUrl: String = "") {
@@ -514,6 +527,7 @@ class JsBridge(private val ctx: Context) {
             putExtra("action", "start")
         }
         ctx.startService(intent)
+        maybePromptBatteryOptimization()
     }
 
     fun getDownloadStatus(callback: String) {
@@ -686,6 +700,7 @@ class JsBridge(private val ctx: Context) {
                 putExtra("action", "start")
             }
             ctx.startService(intent)
+            maybePromptBatteryOptimization()
 
             evalJs("$callback(null, ${allRecords.size})")
         }

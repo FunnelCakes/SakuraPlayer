@@ -36,6 +36,15 @@ object SettingsPrefs {
         get() = prefs.getLong("follow_last_check", 0)
         set(v) = prefs.edit().putLong("follow_last_check", v).apply()
 
+    /**
+     * Whether we have already shown the battery-optimization-exemption prompt for
+     * background downloads. Persisted so we don't nag the user on every download;
+     * once dismissed (or once the user grants the exemption) it stays true.
+     */
+    var hasPromptedBatteryOptimization: Boolean
+        get() = prefs.getBoolean("has_prompted_battery_optimization", false)
+        set(v) = prefs.edit().putBoolean("has_prompted_battery_optimization", v).apply()
+
     fun getString(key: String, def: String = ""): String = prefs.getString(key, def) ?: def
     fun setString(key: String, v: String) = prefs.edit().putString(key, v).apply()
 }

@@ -10,7 +10,9 @@ import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.provider.DocumentsContract
+import android.provider.Settings
 import android.util.Log
 import android.view.View
 import android.view.ViewGroup
@@ -397,6 +399,41 @@ class MainActivity : AppCompatActivity() {
         if (needed.isNotEmpty()) {
             requestPermissionLauncher.launch(needed.toTypedArray())
         }
+    }
+
+    /**
+     * Check whether the app is exempt from battery optimization. If it is NOT
+     * (which on Huawei/EMUI leaves the download process subject to fastHibernation
+     * freezes when the app is backgrounded), prompt the user once to allow running
+     * in the background. Called when a download is first started.
+     *
+     * This is a best-effort, non-intrusive prompt: it only fires on the first
+     * download start (per install), and it does not force the user — they can
+     * dismiss it. If they already granted the exemption, nothing is shown.
+     */
+    fun requestBatteryOptimizationExemptionIfNeeded() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
+        val pm = getSystemService(PowerManager::class.java)
+        if (pm.isIgnoringBatteryOptimizations(packageName)) return
+        if (SettingsPrefs.hasPromptedBatteryOptimization) return
+        SettingsPrefs.hasPromptedBatteryOptimization = true
+
+        android.app.AlertDialog.Builder(this)
+            .setTitle("允许后台下载")
+            .setMessage("为了在切到后台时也能稳定下载，请在系统设置中允许「樱花播放器」在后台运行（关闭电池优化）。")
+            .setPositiveButton("去设置") { _, _ ->
+                try {
+                    val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                        data = Uri.parse("package:$packageName")
+                    }
+                    startActivity(intent)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Battery optimization intent failed", e)
+                    Toast.makeText(this, "请到系统设置中允许本应用在后台运行", Toast.LENGTH_LONG).show()
+                }
+            }
+            .setNegativeButton("暂不", null)
+            .show()
     }
 
     // ==================== LocalPlayer ExoPlayer Bridge ====================
