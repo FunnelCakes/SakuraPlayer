@@ -33,6 +33,13 @@ data class DownloadTask(
 object DownloadManager {
     private const val TAG = "DownloadManager"
     private const val RACE_SAMPLE_SECONDS = 5L
+    /**
+     * Hard backstop around the whole multi-CDN race (race selection + Phase 2
+     * convergence). Guarantees a pathological CDN can never pin a semaphore permit
+     * forever. On timeout we fall back to a plain single-CDN download from the
+     * first working URL.
+     */
+    private const val RACE_TIMEOUT_MS = 60_000L
 
     private val tasks = ConcurrentHashMap<String, DownloadTask>()
     private val semaphore = Semaphore(2) // max 2 concurrent downloads
@@ -186,31 +193,37 @@ object DownloadManager {
                 } else {
                     // Extract m3u8 URLs. Prefer the stored play page URL (re-download) which carries
                     // the exact sid that worked before; fall back to probing sids 1..4 (batch download).
-                    val allCdnUrls = mutableListOf<Pair<String, Int>>()
+                    // Collect candidate CDN URLs then deduplicate: several sids often
+                    // resolve to the exact same m3u8 URL. Racing one CDN against itself
+                    // wastes bandwidth and multiplies the number of losers that could
+                    // get stuck mid-call when a winner is chosen.
+                    val candidateUrls = mutableListOf<Pair<String, Int>>()
 
                     if (task.playPageUrl.isNotEmpty()) {
                         try {
                             val vu = VideoExtractor.extractFromPlayPageUrl(task.playPageUrl)
                             if (vu.m3u8Url.isNotEmpty()) {
                                 val sid = extractSidFromUrl(task.playPageUrl)
-                                allCdnUrls.add(vu.m3u8Url to sid)
+                                candidateUrls.add(vu.m3u8Url to sid)
                                 playPageUrlUsed = task.playPageUrl
                                 Log.e(TAG, "CDN from stored play page (sid=$sid): ${vu.m3u8Url.take(60)}...")
                             }
                         } catch (_: Exception) { Log.e(TAG, "CDN from stored play page unavailable") }
                     }
 
-                    if (allCdnUrls.isEmpty()) {
+                    if (candidateUrls.isEmpty()) {
                         for (sid in 1..4) {
                             try {
                                 val vu = VideoExtractor.extractFromPlayPage(domain, task.videoId, task.epIndex, sid)
                                 if (vu.m3u8Url.isNotEmpty()) {
-                                    allCdnUrls.add(vu.m3u8Url to sid)
+                                    candidateUrls.add(vu.m3u8Url to sid)
                                     Log.e(TAG, "CDN sid=$sid: ${vu.m3u8Url.take(60)}...")
                                 }
                             } catch (_: Exception) { Log.e(TAG, "CDN sid=$sid unavailable") }
                         }
                     }
+
+                    val allCdnUrls = dedupeCdnUrls(candidateUrls)
 
                     if (allCdnUrls.isEmpty()) throw Exception("无法获取视频地址 — 所有源均不可用")
 
@@ -224,9 +237,21 @@ object DownloadManager {
                         TsDownloader.download(url, task, playPageUrlUsed, { notifyCallback(it) },
                             threadCount = TsDownloader.CONCURRENT_THREADS)
                     } else {
-                        // Multi-CDN: race all, eliminate slow ones, converge on fastest
-                        val winnerSid = raceAndConverge(task, allCdnUrls)
-                        playPageUrlUsed = "$domain/index.php/vod/play/id/${task.videoId}/sid/$winnerSid/nid/${task.epIndex}.html"
+                        // Multi-CDN: race all, eliminate slow ones, converge on fastest.
+                        // Hard backstop: a pathological CDN can never pin a permit forever.
+                        try {
+                            val winnerSid = withTimeout(RACE_TIMEOUT_MS) { raceAndConverge(task, allCdnUrls) }
+                            playPageUrlUsed = "$domain/index.php/vod/play/id/${task.videoId}/sid/$winnerSid/nid/${task.epIndex}.html"
+                        } catch (_: TimeoutCancellationException) {
+                            Log.e(TAG, "CDN 竞速超时(${RACE_TIMEOUT_MS}ms)，回退到首个可用源")
+                            val (url, sid) = allCdnUrls.first()
+                            if (playPageUrlUsed.isBlank()) {
+                                playPageUrlUsed = "$domain/index.php/vod/play/id/${task.videoId}/sid/$sid/nid/${task.epIndex}.html"
+                            }
+                            task.status = "downloading"
+                            TsDownloader.download(url, task, playPageUrlUsed, { notifyCallback(it) },
+                                threadCount = TsDownloader.CONCURRENT_THREADS)
+                        }
                     }
                 }
 
@@ -302,138 +327,158 @@ object DownloadManager {
         task: DownloadTask,
         cdnUrls: List<Pair<String, Int>>
     ): Int = withContext(Dispatchers.IO) {
-        val numCdns = cdnUrls.size
-        val threadsPerCdn = maxOf(4, TsDownloader.CONCURRENT_THREADS / numCdns)
-        Log.e(TAG, "Multi-CDN race: $numCdns CDNs, $threadsPerCdn threads each, sample ${RACE_SAMPLE_SECONDS}s")
+        // The race jobs run in their OWN scope, NOT as children of this withContext.
+        // A loser CDN stuck in a blocking OkHttp execute() (trickling stream) never
+        // completes. As a child of the withContext that would block the withContext
+        // from returning forever — pinning the semaphore permit and stalling the whole
+        // queue. Detaching them lets this function return (releasing the permit) even
+        // while a loser is still stuck. raceScope.cancel() is non-blocking, and the
+        // raceMode callTimeout-bounded client frees the blocked thread shortly after.
+        val raceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        try {
+            val numCdns = cdnUrls.size
+            val threadsPerCdn = maxOf(4, TsDownloader.CONCURRENT_THREADS / numCdns)
+            Log.e(TAG, "Multi-CDN race: $numCdns CDNs, $threadsPerCdn threads each, sample ${RACE_SAMPLE_SECONDS}s")
 
-        // Track bytes downloaded per CDN for speed comparison
-        val cdnProgress = ConcurrentHashMap<Int, Long>() // sid -> bytesDownloaded
-        val raceJobs = mutableListOf<Job>()
+            // Track bytes downloaded per CDN for speed comparison
+            val cdnProgress = ConcurrentHashMap<Int, Long>() // sid -> bytesDownloaded
+            val raceJobs = mutableListOf<Job>()
 
-        // Reset main task progress so UI shows race state
-        task.progress = 0
+            // Reset main task progress so UI shows race state
+            task.progress = 0
 
-        // Phase 1: Launch all CDNs in parallel
-        for ((url, sid) in cdnUrls) {
-            val raceTask = task.copy(
-                id = "${task.id}_race_$sid",
-                status = "downloading",
-                progress = 0,
-                downloaded = 0
-            )
-            val playPageUrl = "$domain/index.php/vod/play/id/${task.videoId}/sid/$sid/nid/${task.epIndex}.html"
-            val job = launch(Dispatchers.IO) {
-                try {
-                    TsDownloader.download(url, raceTask, playPageUrl,
-                        onProgress = { t ->
-                            cdnProgress[sid] = t.downloaded
-                            // Forward progress from the fastest CDN to the UI
-                            if (t.progress > task.progress) {
-                                task.progress = t.progress
-                                task.speed = t.speed
-                                notifyCallback(task)
-                            }
-                        },
-                        threadCount = threadsPerCdn,
-                        tempDirSuffix = "_sid$sid"
-                    )
-                    // If download completed during race, mark as winner
-                    if (raceTask.status == "completed") {
-                        cdnProgress[sid] = Long.MAX_VALUE
+            // Phase 1: Launch all CDNs in parallel (into the detached raceScope)
+            for ((url, sid) in cdnUrls) {
+                val raceTask = task.copy(
+                    id = "${task.id}_race_$sid",
+                    status = "downloading",
+                    progress = 0,
+                    downloaded = 0
+                )
+                val playPageUrl = "$domain/index.php/vod/play/id/${task.videoId}/sid/$sid/nid/${task.epIndex}.html"
+                val job = raceScope.launch(Dispatchers.IO) {
+                    try {
+                        TsDownloader.download(url, raceTask, playPageUrl,
+                            onProgress = { t ->
+                                cdnProgress[sid] = t.downloaded
+                                // Forward progress from the fastest CDN to the UI
+                                if (t.progress > task.progress) {
+                                    task.progress = t.progress
+                                    task.speed = t.speed
+                                    notifyCallback(task)
+                                }
+                            },
+                            threadCount = threadsPerCdn,
+                            tempDirSuffix = "_sid$sid",
+                            raceMode = true
+                        )
+                        // If download completed during race, mark as winner
+                        if (raceTask.status == "completed") {
+                            cdnProgress[sid] = Long.MAX_VALUE
+                        }
+                    } catch (_: CancellationException) {
+                        // Expected for losers
+                    } catch (_: Exception) {
+                        // A single CDN failing during the race is expected; ignore it.
                     }
-                } catch (_: CancellationException) {
-                    // Expected for losers
+                }
+                raceJobs.add(job)
+            }
+
+            // Adaptive polling loop: exit early when a clear winner emerges
+            var winner: Int? = null
+            var waited = 0L
+            val pollInterval = 500L
+            val maxWait = RACE_SAMPLE_SECONDS * 1000
+
+            while (waited < maxWait && winner == null) {
+                delay(pollInterval)
+                waited += pollInterval
+
+                // Check: any CDN has meaningful progress?
+                val sorted = cdnProgress.entries
+                    .filter { it.value > 0 }
+                    .sortedByDescending { it.value }
+
+                if (sorted.isEmpty()) continue
+
+                val best = sorted[0]
+
+                // Early termination: best has > 500KB AND leads 2nd by 30%
+                if (best.value > 500_000L && (sorted.size == 1 || best.value > sorted[1].value * 1.3f)) {
+                    winner = best.key
+                    Log.e(TAG, "Early winner sid=$winner after ${waited}ms: ${best.value} bytes")
+                    break
+                }
+
+                // Also win if any CDN downloaded > 2MB
+                if (best.value > 2_000_000L) {
+                    winner = best.key
+                    Log.e(TAG, "Early winner sid=$winner after ${waited}ms: >2MB downloaded")
+                    break
                 }
             }
-            raceJobs.add(job)
-        }
 
-        // Adaptive polling loop: exit early when a clear winner emerges
-        var winner: Int? = null
-        var waited = 0L
-        val pollInterval = 500L
-        val maxWait = RACE_SAMPLE_SECONDS * 1000
-
-        while (waited < maxWait && winner == null) {
-            delay(pollInterval)
-            waited += pollInterval
-
-            // Check: any CDN has meaningful progress?
-            val sorted = cdnProgress.entries
-                .filter { it.value > 0 }
-                .sortedByDescending { it.value }
-
-            if (sorted.isEmpty()) continue
-
-            val best = sorted[0]
-
-            // Early termination: best has > 500KB AND leads 2nd by 30%
-            if (best.value > 500_000L && (sorted.size == 1 || best.value > sorted[1].value * 1.3f)) {
-                winner = best.key
-                Log.e(TAG, "Early winner sid=$winner after ${waited}ms: ${best.value} bytes")
-                break
+            // Fallback: pick the best after timeout
+            if (winner == null) {
+                winner = cdnProgress.maxByOrNull { it.value }?.key
+                    ?: cdnUrls.first().second
             }
 
-            // Also win if any CDN downloaded > 2MB
-            if (best.value > 2_000_000L) {
-                winner = best.key
-                Log.e(TAG, "Early winner sid=$winner after ${waited}ms: >2MB downloaded")
-                break
+            val winnerEntry = cdnUrls.find { it.second == winner }!!
+            Log.e(TAG, "Race winner: sid=$winner (${cdnProgress[winner]} bytes), killing ${numCdns - 1} losers")
+
+            // Cancel all race jobs and wait for them to stop (best-effort, bounded).
+            // This join is NOT what releases the permit — the detached raceScope is,
+            // so a loser stuck in a blocking execute() cannot hold up the queue.
+            raceJobs.forEach { it.cancel() }
+            try {
+                withTimeout(3000) {
+                    raceJobs.forEach { it.join() }
+                }
+            } catch (_: TimeoutCancellationException) {
+                Log.e(TAG, "Race jobs did not cancel within timeout, proceeding anyway")
             }
-        }
 
-        // Fallback: pick the best after timeout
-        if (winner == null) {
-            winner = cdnProgress.maxByOrNull { it.value }?.key
-                ?: cdnUrls.first().second
-        }
-
-        val winnerEntry = cdnUrls.find { it.second == winner }!!
-        Log.e(TAG, "Race winner: sid=$winner (${cdnProgress[winner]} bytes), killing ${numCdns - 1} losers")
-
-        // Cancel all race jobs and wait for them to stop (with timeout)
-        raceJobs.forEach { it.cancel() }
-        try {
-            withTimeout(3000) {
-                raceJobs.forEach { it.join() }
+            // Clean up ALL race temp dirs — do NOT reuse partial segments across CDNs.
+            // Different CDNs may use different encoding parameters (resolution, bitrate,
+            // frame rate), AES keys, or segment structures, so mixing their segments
+            // corrupts the final MP4 (plays only a few seconds despite large size).
+            for ((_, sid) in cdnUrls) {
+                val dir = File(task.saveDir, ".temp_${task.videoId}_${task.epIndex}_sid$sid")
+                if (dir.exists()) {
+                    if (dir.deleteRecursively()) Log.e(TAG, "Race cleanup: removed sid=$sid")
+                    else Log.e(TAG, "Race cleanup: FAILED sid=$sid")
+                }
             }
-        } catch (_: TimeoutCancellationException) {
-            Log.e(TAG, "Race jobs did not cancel within timeout, proceeding anyway")
-        }
 
-        // Clean up ALL race temp dirs — do NOT reuse partial segments across CDNs.
-        // Different CDNs may use different encoding parameters (resolution, bitrate,
-        // frame rate), AES keys, or segment structures, so mixing their segments
-        // corrupts the final MP4 (plays only a few seconds despite large size).
-        for ((_, sid) in cdnUrls) {
-            val dir = File(task.saveDir, ".temp_${task.videoId}_${task.epIndex}_sid$sid")
-            if (dir.exists()) {
-                if (dir.deleteRecursively()) Log.e(TAG, "Race cleanup: removed sid=$sid")
-                else Log.e(TAG, "Race cleanup: FAILED sid=$sid")
+            // Delete the standard temp dir too so Phase 2 starts 100% fresh
+            // (any leftover partial segments there would otherwise be resumed).
+            val standardTempDir = File(task.saveDir, ".temp_${task.videoId}_${task.epIndex}")
+            if (standardTempDir.exists()) {
+                if (standardTempDir.deleteRecursively()) {
+                    Log.e(TAG, "Race cleanup: removed standard temp dir")
+                } else {
+                    Log.e(TAG, "Race cleanup: FAILED to remove standard temp dir")
+                }
             }
-        }
 
-        // Delete the standard temp dir too so Phase 2 starts 100% fresh
-        // (any leftover partial segments there would otherwise be resumed).
-        val standardTempDir = File(task.saveDir, ".temp_${task.videoId}_${task.epIndex}")
-        if (standardTempDir.exists()) {
-            if (standardTempDir.deleteRecursively()) {
-                Log.e(TAG, "Race cleanup: removed standard temp dir")
-            } else {
-                Log.e(TAG, "Race cleanup: FAILED to remove standard temp dir")
-            }
+            // Phase 2: fresh download from winning CDN (no partial reuse)
+            task.progress = 0
+            notifyCallback(task)
+            task.status = "downloading"
+            Log.e(TAG, "Phase 2: sid=$winner fresh download with ${TsDownloader.CONCURRENT_THREADS} threads")
+            val (url, _) = winnerEntry
+            val playPageUrl = "$domain/index.php/vod/play/id/${task.videoId}/sid/$winner/nid/${task.epIndex}.html"
+            TsDownloader.download(url, task, playPageUrl, { notifyCallback(it) },
+                threadCount = TsDownloader.CONCURRENT_THREADS)
+            return@withContext winner
+        } finally {
+            // Cancel the detached scope. Non-blocking: a loser still blocked in a
+            // callTimeout-bounded execute() unwinds on its own shortly after, but it
+            // can no longer block the permit release.
+            raceScope.cancel()
         }
-
-        // Phase 2: fresh download from winning CDN (no partial reuse)
-        task.progress = 0
-        notifyCallback(task)
-        task.status = "downloading"
-        Log.e(TAG, "Phase 2: sid=$winner fresh download with ${TsDownloader.CONCURRENT_THREADS} threads")
-        val (url, _) = winnerEntry
-        val playPageUrl = "$domain/index.php/vod/play/id/${task.videoId}/sid/$winner/nid/${task.epIndex}.html"
-        TsDownloader.download(url, task, playPageUrl, { notifyCallback(it) },
-            threadCount = TsDownloader.CONCURRENT_THREADS)
-        return@withContext winner
     }
 
     private fun notifyCallback(task: DownloadTask) {
@@ -446,6 +491,17 @@ object DownloadManager {
     fun extractSidFromUrl(url: String): Int {
         val match = Regex("""/sid/(\d+)/""").find(url)
         return match?.groupValues?.get(1)?.toIntOrNull() ?: 1
+    }
+
+    /**
+     * Deduplicate CDN URLs keeping the first occurrence of each URL. Several sids
+     * on the mirrors often resolve to the exact same m3u8, so without this the
+     * race would run one CDN against itself (wasting bandwidth and multiplying
+     * the number of losers that can get stuck mid-call).
+     */
+    internal fun dedupeCdnUrls(urls: List<Pair<String, Int>>): List<Pair<String, Int>> {
+        val seen = mutableSetOf<String>()
+        return urls.filter { seen.add(it.first) }
     }
 }
 

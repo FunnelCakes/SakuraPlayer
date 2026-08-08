@@ -8,6 +8,7 @@ import okhttp3.Request
 import java.io.File
 import java.io.FileOutputStream
 import java.io.RandomAccessFile
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
@@ -16,6 +17,16 @@ import javax.crypto.spec.SecretKeySpec
 object TsDownloader {
     private const val TAG = "TsDownloader"
     const val CONCURRENT_THREADS = 16
+
+    /**
+     * Total-call bound (including reading the response body) applied to segment
+     * downloads in RACE mode only. A trickling CDN stream never trips the shared
+     * 30s idle readTimeout, so without this a cancelled race loser could block
+     * inside OkHttp execute() for an unbounded time. In race mode we only sample
+     * speed to pick a winner, so a 15s bound is plenty; Phase 2 / single downloads
+     * keep the unbounded client so slow-but-working connections can still finish.
+     */
+    private const val RACE_CALL_TIMEOUT_SECONDS = 15L
 
     internal data class M3u8Info(
         val segments: List<String>,
@@ -97,7 +108,8 @@ object TsDownloader {
         referer: String = "https://yinghua14.com/",
         onProgress: (DownloadTask) -> Unit,
         threadCount: Int = CONCURRENT_THREADS,
-        tempDirSuffix: String = ""
+        tempDirSuffix: String = "",
+        raceMode: Boolean = false
     ) = withContext(Dispatchers.IO) {
 
         // Step 1: Probe CDN to determine best connection strategy
@@ -111,12 +123,20 @@ object TsDownloader {
         }
 
         // Step 2: Select client based on strategy
-        val downloadClient = when (probe.strategy) {
+        val baseClient = when (probe.strategy) {
             CdnProber.DownloadStrategy.TLS_1_2 -> HttpClient.client
             CdnProber.DownloadStrategy.TLS_1_3 -> HttpClient.clientTls13
             CdnProber.DownloadStrategy.HTTP_ONLY -> HttpClient.clientHttp
             else -> HttpClient.client
         }
+        // In race mode we only sample speed to pick a winner, and cancelled losers
+        // must actually unblock. A trickling stream never trips the 30s idle
+        // readTimeout, so bound the whole call with a callTimeout. Phase 2 / single
+        // downloads (raceMode=false) keep the unbounded client so slow-but-working
+        // connections can still finish full segment downloads.
+        val downloadClient = if (raceMode) {
+            baseClient.newBuilder().callTimeout(RACE_CALL_TIMEOUT_SECONDS, TimeUnit.SECONDS).build()
+        } else baseClient
         Log.e(TAG, "Using client: ${downloadClient.hashCode()} for strategy ${probe.strategy}")
 
         // Step 3: Parse m3u8 using the determined client
