@@ -289,7 +289,7 @@ function showDevLog() { openOverlay('devlog'); }
 function closeDevLog() { closeOverlay(); }
 
 function showAbout() {
-    showToast('樱花动漫播放器 v1.0.0<br>作者: 奶球<br>ALL RIGHTS RESERVED.<br>出Ave Mujica7thS席', 3000);
+    showToast('樱花动漫播放器 v1.1.2<br>作者: 奶球<br>ALL RIGHTS RESERVED.<br>出Ave Mujica7thS席', 3000);
 }
 
 // ==================== Discover Page ====================

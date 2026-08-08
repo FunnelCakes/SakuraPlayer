@@ -12,8 +12,8 @@ android {
         applicationId = "com.sakura.player"
         minSdk = 24
         targetSdk = 35
-        versionCode = 2
-        versionName = "1.1.0beta"
+        versionCode = 3
+        versionName = "1.1.2"
     }
 
     signingConfigs {
